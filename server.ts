@@ -1,5 +1,4 @@
 import express, { Request, Response, NextFunction } from 'express';
-import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -15,8 +14,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'voters_election_secure_jwt_key_202
 
 // ----------------------------------------------------
 // 1. Comprehensive CORS Middleware
-// Supports requests from localhost, custom ports, and all origins
-// Handles Preflight OPTIONS and Credentials safely
+// Supports requests from http://localhost:3000, 5173, XAMPP, and all origins
 // ----------------------------------------------------
 app.use((req: Request, res: Response, next: NextFunction) => {
   const origin = req.headers.origin;
@@ -32,7 +30,11 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   );
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-User-Id, X-User-Role, X-User-Numeric-Id'
+    'Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma, X-User-Id, X-User-Role, X-User-Numeric-Id'
+  );
+  res.setHeader(
+    'Access-Control-Expose-Headers',
+    'Content-Length, Content-Type, Authorization'
   );
   res.setHeader('Access-Control-Max-Age', '86400');
 
@@ -53,15 +55,10 @@ if (!fs.existsSync(uploadsDir)) {
 }
 app.use('/uploads', express.static(uploadsDir));
 
-const upload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadsDir),
-    filename: (req, file, cb) => {
-      const safe = file.originalname.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
-      cb(null, `${Date.now()}_${safe}`);
-    },
-  }),
-});
+// Serve Swagger static files & UI
+const swaggerDir = path.join(__dirname, 'swagger');
+app.use('/swagger', express.static(swaggerDir));
+app.use('/docs', express.static(swaggerDir));
 
 // In-Memory Models
 interface AdminUser {
@@ -187,6 +184,11 @@ let voters = [
 // 2. Routes (Matching all PHP routing endpoints)
 // ----------------------------------------------------
 
+// Swagger UI at root
+app.get('/', (req, res) => {
+  res.sendFile(path.join(swaggerDir, 'index.html'));
+});
+
 // Health Check
 app.get(['/api/health', '/voters_php/api/health'], (req, res) => {
   res.json({
@@ -263,6 +265,18 @@ const handleAuth = (req: Request, res: Response) => {
   });
 };
 
+// GET info handler
+const handleAuthGet = (req: Request, res: Response) => {
+  res.json({
+    status: 'active',
+    endpoint: '/api/auth/login',
+    method: 'POST',
+    message: 'Auth login route is ready. Send a POST request with JSON body { username, password }.',
+    cors: 'enabled',
+  });
+};
+
+app.get(['/api/auth/login', '/voters_php/api/auth/login'], handleAuthGet);
 app.post('/api/auth/login', handleAuth);
 app.post('/api/auth', handleAuth);
 app.post('/voters_php/api/auth/login', handleAuth);
@@ -332,21 +346,7 @@ app.post(['/api/voters/flag', '/voters_php/api/voters/flag'], (req, res) => {
   res.json({ success: true, flag_color: flagColor });
 });
 
-// Root API Welcome / Status
-app.get('/', (req, res) => {
-  res.json({
-    message: 'Voters PHP & Node Backend API Server',
-    cors: 'Enabled (Supports credentials & all origins)',
-    endpoints: {
-      auth: 'POST /api/auth/login or /voters_php/api/auth/login',
-      voters: 'GET /api/voters or /voters_php/api/voters',
-      villages: 'GET /api/villages or /voters_php/api/villages',
-      stats: 'GET /api/admin/stats or /voters_php/api/admin/stats',
-      health: 'GET /api/health',
-    },
-  });
-});
-
 app.listen(Number(PORT), '0.0.0.0', () => {
   console.log(`[Voters API] Server running on http://0.0.0.0:${PORT}`);
+  console.log(`[Swagger Docs] http://0.0.0.0:${PORT}/swagger`);
 });

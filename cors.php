@@ -1,22 +1,29 @@
 <?php
-// backend/cors.php - Centralized, Robust CORS Headers for Local & Remote environments
+// backend/cors.php - Centralized, Bulletproof CORS Headers for React App on http://localhost:3000 & All Origins
 
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-
-// Allow all origins safely with credentials support
-if (!empty($origin)) {
-    header("Access-Control-Allow-Origin: $origin");
-    header("Access-Control-Allow-Credentials: true");
-} else {
-    header("Access-Control-Allow-Origin: *");
+if (!ob_get_level()) {
+    ob_start();
 }
 
-header("Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, Origin, X-User-Id, X-User-Role, X-User-Numeric-Id");
-header("Access-Control-Max-Age: 86400");
+// Extract requesting origin
+$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 
-// Handle preflight OPTIONS request
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+// When Origin is present, reflect it dynamically with credentials support
+if (!empty($origin)) {
+    header("Access-Control-Allow-Origin: $origin", true);
+    header("Access-Control-Allow-Credentials: true", true);
+} else {
+    header("Access-Control-Allow-Origin: *", true);
+}
+
+header("Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS", true);
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma, X-User-Id, X-User-Role, X-User-Numeric-Id", true);
+header("Access-Control-Expose-Headers: Content-Length, Content-Type, Authorization", true);
+header("Access-Control-Max-Age: 86400", true);
+
+// Handle preflight OPTIONS request immediately
+if (isset($_SERVER['REQUEST_METHOD']) && strtoupper($_SERVER['REQUEST_METHOD']) === 'OPTIONS') {
     http_response_code(200);
-    exit();
+    header("Content-Length: 0");
+    exit(0);
 }
