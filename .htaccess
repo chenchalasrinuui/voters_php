@@ -1,0 +1,27 @@
+# Allow cross-origin requests
+<IfModule mod_headers.c>
+    Header always set Access-Control-Allow-Origin "*"
+    Header always set Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    Header always set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, Accept, Origin, X-User-Id, X-User-Role, X-User-Numeric-Id"
+</IfModule>
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Handle Preflight OPTIONS requests
+    RewriteCond %{REQUEST_METHOD} OPTIONS
+    RewriteRule ^(.*)$ router.php [QSA,L]
+
+    # If physical file or directory exists, serve it directly
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # Map /api/auth/login directly to routes/auth.php or router.php
+    RewriteRule ^api/auth/login/?$ routes/auth.php [QSA,L]
+    RewriteRule ^api/auth/?$ routes/auth.php [QSA,L]
+
+    # Fallback all other api/ calls to router.php
+    RewriteRule ^api/(.*)$ router.php [QSA,L]
+    RewriteRule ^backend/(.*)$ router.php [QSA,L]
+</IfModule>

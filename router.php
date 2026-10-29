@@ -3,7 +3,15 @@
 
 require_once __DIR__ . '/cors.php';
 
-$uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+$uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/';
+
+// Normalize path: remove any subfolder prefix dynamically (e.g. /voters_php, /voters)
+$scriptDir = trim(dirname($_SERVER['SCRIPT_NAME'] ?? ''), '/\\');
+if ($scriptDir && $scriptDir !== '.') {
+    $uri = preg_replace('#^/' . preg_quote($scriptDir, '#') . '#i', '', $uri);
+}
+$uri = preg_replace('#^/voters[^/]*#i', '', $uri);
+$uri = preg_replace('#^/router\.php#i', '', $uri);
 
 // 1. Static file serving for uploads
 if (strpos($uri, '/uploads/') === 0) {
@@ -30,11 +38,12 @@ if (strpos($uri, '/uploads/') === 0) {
 }
 
 // 2. Health check
-if ($uri === '/api/health') {
+if ($uri === '/api/health' || $uri === '/api/health/') {
     header("Content-Type: application/json; charset=UTF-8");
     echo json_encode([
         'status' => 'ok',
         'backend' => 'php',
+        'cors' => 'enabled',
         'php_version' => PHP_VERSION,
         'timestamp' => date('c')
     ]);
@@ -43,7 +52,7 @@ if ($uri === '/api/health') {
 
 // 3. Delegate to modular route files
 
-// Auth routes (/api/auth/* or /backend/auth.php)
+// Auth routes (/api/auth, /api/auth/login, /api/auth/*, or /backend/auth.php)
 if (strpos($uri, '/api/auth') === 0 || $uri === '/backend/auth.php') {
     require __DIR__ . '/routes/auth.php';
     exit();
@@ -109,8 +118,14 @@ if (($uri === '/backend/employees.php' || $uri === '/api/employees') && file_exi
     exit();
 }
 
-if (($uri === '/backend/contactus.php' || $uri === '/api/contactus') && file_exists(__DIR__ . '/contactus.php')) {
-    require __DIR__ . '/contactus.php';
+// Root fallback / status
+if ($uri === '' || $uri === '/') {
+    header("Content-Type: application/json; charset=UTF-8");
+    echo json_encode([
+        'message' => 'Voters PHP Backend Active',
+        'auth_endpoint' => '/api/auth/login',
+        'status' => 'ok'
+    ]);
     exit();
 }
 
