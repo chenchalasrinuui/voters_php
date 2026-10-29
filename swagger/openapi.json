@@ -1,0 +1,243 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Voters Management System API",
+    "description": "Interactive API Documentation & Test Console for Voters Roll, Polling Stations, Admin and Authentication. Supports testing against both local XAMPP (`http://localhost/voters_php`) and local Node.js (`http://localhost:3000`).",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost/voters_php",
+      "description": "Local XAMPP Apache Server"
+    },
+    {
+      "url": "http://localhost:3000",
+      "description": "Local Node.js Server"
+    },
+    {
+      "url": "/",
+      "description": "Current Server Origin"
+    }
+  ],
+  "paths": {
+    "/api/auth/login": {
+      "post": {
+        "summary": "User & Admin Authentication",
+        "description": "Log in with agent or admin credentials. Fully CORS enabled for http://localhost:3000 and any origin.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "username": {
+                    "type": "string",
+                    "example": "srikakulam_agent"
+                  },
+                  "password": {
+                    "type": "string",
+                    "example": "password123"
+                  }
+                },
+                "required": ["username", "password"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "example": true },
+                    "role": { "type": "string", "example": "user" },
+                    "token": { "type": "string", "example": "eyJhbGciOiJIUzI1NiIs..." },
+                    "user": {
+                      "type": "object",
+                      "properties": {
+                        "id": { "type": "integer", "example": 1 },
+                        "username": { "type": "string", "example": "srikakulam_agent" },
+                        "name": { "type": "string", "example": "శ్రీను చెంచల (Srinu Chenchala)" },
+                        "village": { "type": "string", "example": "కొమ్మువలస (Kommuvalasa)" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": { "type": "string", "example": "Invalid username or password" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "Auth Route Health & Info",
+        "description": "Verify route accessibility and CORS headers via GET",
+        "responses": {
+          "200": {
+            "description": "Route active and ready"
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "summary": "Health Check",
+        "description": "Check if API backend and CORS are operational",
+        "responses": {
+          "200": {
+            "description": "Backend is healthy"
+          }
+        }
+      }
+    },
+    "/api/voters": {
+      "get": {
+        "summary": "Get Voters List",
+        "description": "Retrieve voters with optional search by Telugu name, English name, EPIC ID, or House number.",
+        "parameters": [
+          {
+            "name": "village_id",
+            "in": "query",
+            "description": "Filter by village ID (1=Kommuvalasa)",
+            "schema": { "type": "string", "default": "1" }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Search in Telugu or English",
+            "schema": { "type": "string", "example": "రాముడు" }
+          },
+          {
+            "name": "ward",
+            "in": "query",
+            "description": "Filter by ward number",
+            "schema": { "type": "string", "example": "1" }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by voting status (VOTED or NOT_VOTED)",
+            "schema": { "type": "string", "enum": ["all", "VOTED", "NOT_VOTED"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of voters"
+          }
+        }
+      }
+    },
+    "/api/voters/vote": {
+      "post": {
+        "summary": "Toggle Voter Polled Status",
+        "description": "Mark voter as Voted or Not Voted",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "voterId": { "type": "integer", "example": 1 },
+                  "status": { "type": "string", "enum": ["VOTED", "NOT_VOTED"] }
+                },
+                "required": ["voterId"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Status updated successfully"
+          }
+        }
+      }
+    },
+    "/api/voters/flag": {
+      "post": {
+        "summary": "Set Voter Flag Color",
+        "description": "Tag voter sentiment: green (supporter), yellow (neutral), red (opponent), none",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "voterId": { "type": "integer", "example": 1 },
+                  "flagColor": { "type": "string", "enum": ["none", "green", "yellow", "red"], "example": "green" }
+                },
+                "required": ["voterId", "flagColor"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Flag updated successfully"
+          }
+        }
+      }
+    },
+    "/api/villages": {
+      "get": {
+        "summary": "List Polling Stations / Villages",
+        "responses": {
+          "200": {
+            "description": "List of villages with voter turnout statistics"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create Polling Station / Village",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string", "example": "లక్ష్మీనర్సుపేట" },
+                  "booth_name": { "type": "string", "example": "ఎల్ ఎన్ పేట ఉన్నత పాఠశాల" },
+                  "part_no": { "type": "string", "example": "2" }
+                },
+                "required": ["name"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Village created"
+          }
+        }
+      }
+    },
+    "/api/admin/stats": {
+      "get": {
+        "summary": "Election Polling Turnout Stats",
+        "responses": {
+          "200": {
+            "description": "Summary counts and turnout percentage"
+          }
+        }
+      }
+    }
+  }
+}
