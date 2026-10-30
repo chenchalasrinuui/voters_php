@@ -1,13 +1,26 @@
-RewriteEngine On
+<IfModule mod_headers.c>
+    # Ensure Apache outputs CORS headers on ALL responses (including 200, 204, 301 redirects, 404, 500)
+    SetEnvIfNoCase Origin "^(.*)$" CORS_ORIGIN=$1
+    Header always set Access-Control-Allow-Origin "%{CORS_ORIGIN}e" env=CORS_ORIGIN
+    Header always set Access-Control-Allow-Credentials "true" env=CORS_ORIGIN
+    Header always set Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    Header always set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma, X-User-Id, X-User-Role, X-User-Numeric-Id"
+    Header always set Access-Control-Max-Age "86400"
+</IfModule>
 
-# Do not redirect API requests to add a trailing slash
-RewriteCond %{REQUEST_URI} ^/voters_php/api/ [NC]
-RewriteRule ^ - [E=NO_SLASH_REDIRECT:1]
+<IfModule mod_rewrite.c>
+    RewriteEngine On
 
-# Serve existing physical files and directories normally
-RewriteCond %{REQUEST_FILENAME} -f [OR]
-RewriteCond %{REQUEST_FILENAME} -d
-RewriteRule ^ - [L]
+    # Respond to preflight OPTIONS requests immediately
+    RewriteCond %{REQUEST_METHOD} OPTIONS
+    RewriteRule ^(.*)$ - [R=204,L]
 
-# Send all API requests through the master router
-RewriteRule ^api(?:/.*)?$ routes.php [QSA,L]
+    # Serve existing physical files and directories
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # Send all other API requests through router.php (or routes.php)
+    RewriteRule ^api(?:/.*)?$ router.php [QSA,L]
+    RewriteRule ^backend(?:/.*)?$ router.php [QSA,L]
+</IfModule>
