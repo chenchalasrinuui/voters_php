@@ -1,3 +1,13 @@
+<IfModule mod_headers.c>
+    Header unset Access-Control-Allow-Origin
+    SetEnvIfNoCase Origin "^(http(s)?://.*)$" CLIENT_ORIGIN=$1
+    Header always set Access-Control-Allow-Origin "%{CLIENT_ORIGIN}e" env=CLIENT_ORIGIN
+    Header always set Access-Control-Allow-Credentials "true" env=CLIENT_ORIGIN
+    Header always set Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    Header always set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma, X-User-Id, X-User-Role, X-User-Numeric-Id"
+    Header always set Access-Control-Max-Age "86400"
+</IfModule>
+
 <IfModule mod_rewrite.c>
     RewriteEngine On
 

@@ -1,19 +1,19 @@
 <?php
-// backend/routes/auth.php - Authentication API (User & Admin Login from Database)
+// backend/routes/auth.php - Database-Driven Authentication (User & Admin Login)
 
 require_once __DIR__ . '/../cors.php';
 require_once __DIR__ . '/../database.php';
 
 header("Content-Type: application/json; charset=UTF-8");
 
-// Handle GET request (Diagnostic check)
+// Diagnostic GET handler
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     http_response_code(200);
     echo json_encode([
         'status' => 'active',
         'endpoint' => '/api/auth/login',
         'method' => 'POST',
-        'message' => 'Auth login route is active. Database-driven authentication.',
+        'message' => 'Auth login route is active and connecting directly to server database.',
         'cors' => 'enabled'
     ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     exit();
@@ -26,7 +26,7 @@ if (empty($data)) {
     $data = $_POST;
 }
 
-// Accept username, userId, user_id, userid, user, id
+// Extract login identifier (userId, username, user_id, userid, user, id)
 $username = trim(
     $data['username'] ?? 
     $data['userId'] ?? 
@@ -39,6 +39,7 @@ $username = trim(
     ''
 );
 
+// Extract password (password, pwd, pass)
 $password = trim(
     $data['password'] ?? 
     $data['pwd'] ?? 
@@ -49,12 +50,12 @@ $password = trim(
 if ($username === '' || $password === '') {
     http_response_code(400);
     echo json_encode([
-        'error' => 'యూజర్‌నేమ్ మరియు పాస్‌వర్డ్ నమోదు చేయండి (User ID / Username and Password required)'
+        'error' => 'User ID / Username and Password are required.'
     ], JSON_UNESCAPED_UNICODE);
     exit();
 }
 
-// Password verification function (plain text, bcrypt, md5, sha1)
+// Password verification function (supports plain text, bcrypt, md5, sha1)
 function checkPassword($input, $stored) {
     if ($input === $stored) {
         return true;
@@ -79,7 +80,7 @@ try {
 } catch (Throwable $e) {
     http_response_code(500);
     echo json_encode([
-        'error' => 'డేటాబేస్ కనెక్షన్ లోపం (Database connection failed): ' . $e->getMessage()
+        'error' => 'Database connection failed: ' . $e->getMessage()
     ], JSON_UNESCAPED_UNICODE);
     exit();
 }
@@ -87,9 +88,9 @@ try {
 $matchedUser = null;
 $matchedRole = 'user';
 
-// 1. Check in Admin table (exact columns: id, username, password, name)
+// 1. Check in Admin table (id, username, password, name)
 try {
-    $stmt = $pdo->prepare("SELECT * FROM admin WHERE username = ? LIMIT 1");
+    $stmt = $pdo->prepare("SELECT * FROM admin WHERE LOWER(username) = LOWER(?) LIMIT 1");
     $stmt->execute([$username]);
     $adminRow = $stmt->fetch();
     if ($adminRow && checkPassword($password, $adminRow['password'])) {
@@ -97,13 +98,13 @@ try {
         $matchedRole = 'admin';
     }
 } catch (Throwable $e) {
-    error_log("Admin table check error: " . $e->getMessage());
+    error_log("Admin table lookup error: " . $e->getMessage());
 }
 
-// 2. Check in Users table (exact columns: id, username, password, name, state, district, constituency, mandal, village, role, status)
+// 2. Check in Users table (id, username, password, name, state, district, constituency, mandal, village, role, status)
 if (!$matchedUser) {
     try {
-        $stmt = $pdo->prepare("SELECT * FROM users WHERE username = ? LIMIT 1");
+        $stmt = $pdo->prepare("SELECT * FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1");
         $stmt->execute([$username]);
         $userRow = $stmt->fetch();
         if ($userRow && checkPassword($password, $userRow['password'])) {
@@ -111,22 +112,35 @@ if (!$matchedUser) {
             $matchedRole = $userRow['role'] ?? 'user';
         }
     } catch (Throwable $e) {
-        error_log("Users table check error: " . $e->getMessage());
+        error_log("Users table lookup error: " . $e->getMessage());
     }
 }
 
-// If matched, verify active status and return user
+// 3. Check in Employees table if present
+if (!$matchedUser) {
+    try {
+        $stmt = $pdo->prepare("SELECT * FROM employees WHERE LOWER(email) = LOWER(?) OR phone = ? LIMIT 1");
+        $stmt->execute([$username, $username]);
+        $empRow = $stmt->fetch();
+        if ($empRow && (empty($empRow['password']) || checkPassword($password, $empRow['password']))) {
+            $matchedUser = $empRow;
+            $matchedRole = $empRow['role'] ?? 'Employee';
+        }
+    } catch (Throwable $e) {}
+}
+
+// If user found in database
 if ($matchedUser) {
     if (isset($matchedUser['status']) && strtolower($matchedUser['status']) !== 'active') {
         http_response_code(403);
         echo json_encode([
-            'error' => 'మీ ఖాతా నిలిపివేయబడింది (Your account has been deactivated by administrator)'
+            'error' => 'Your account has been deactivated by the administrator.'
         ], JSON_UNESCAPED_UNICODE);
         exit();
     }
 
-    $loginIdentifier = $matchedUser['username'] ?? $username;
-    $token = bin2hex(random_bytes(20));
+    $loginIdentifier = $matchedUser['username'] ?? $matchedUser['phone'] ?? $matchedUser['email'] ?? $username;
+    $token = bin2hex(random_bytes(24));
 
     echo json_encode([
         'success' => true,
@@ -137,11 +151,11 @@ if ($matchedUser) {
             'username' => $loginIdentifier,
             'userId' => $loginIdentifier,
             'name' => $matchedUser['name'] ?? $loginIdentifier,
-            'state' => $matchedUser['state'] ?? 'ఆంధ్రప్రదేశ్ (Andhra Pradesh)',
-            'district' => $matchedUser['district'] ?? 'శ్రీకాకుళం (Srikakulam)',
-            'constituency' => $matchedUser['constituency'] ?? '4 - పాతపట్నం (Patapatnam)',
-            'mandal' => $matchedUser['mandal'] ?? 'ఎల్ ఎన్ పేట (L.N. Peta)',
-            'village' => $matchedUser['village'] ?? 'కొమ్మువలస (Kommuvalasa)',
+            'state' => $matchedUser['state'] ?? 'Andhra Pradesh',
+            'district' => $matchedUser['district'] ?? 'Srikakulam',
+            'constituency' => $matchedUser['constituency'] ?? 'Patapatnam',
+            'mandal' => $matchedUser['mandal'] ?? 'L.N. Peta',
+            'village' => $matchedUser['village'] ?? 'Kommuvalasa',
             'role' => $matchedRole,
             'status' => $matchedUser['status'] ?? 'active'
         ]
@@ -149,9 +163,9 @@ if ($matchedUser) {
     exit();
 }
 
-// No matching user found in database
+// No matching user in database or incorrect password
 http_response_code(401);
 echo json_encode([
-    'error' => 'చెల్లని యూజర్ ఐడీ లేదా పాస్‌వర్డ్ (Invalid User ID or Password. No matching user found in database.)'
+    'error' => 'Invalid User ID or Password. No matching user found in database.'
 ], JSON_UNESCAPED_UNICODE);
 exit();
