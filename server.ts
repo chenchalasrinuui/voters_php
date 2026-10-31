@@ -42,16 +42,13 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(swaggerDir, 'index.html'));
 });
 
-// Authentication Endpoint
+// Authentication Endpoint (mirrors real database: admin/admin123 and srinu/srinu123)
 const handleAuth = (req: Request, res: Response) => {
   const username = (
     req.body.username ||
     req.body.userId ||
     req.body.user_id ||
     req.body.userid ||
-    req.body.phone ||
-    req.body.mobile ||
-    req.body.email ||
     req.body.user ||
     req.body.id ||
     ''
@@ -69,21 +66,45 @@ const handleAuth = (req: Request, res: Response) => {
     return;
   }
 
-  const isAdmin = (username === 'admin');
-  res.json({
-    success: true,
-    role: isAdmin ? 'admin' : 'user',
-    token: 'auth_token_' + Date.now(),
-    user: {
-      id: 1,
-      username,
-      userId: username,
-      name: isAdmin ? 'Chief Election Administrator' : 'శ్రీను చెంచల (Srinu Chenchala)',
-      phone: '9110383335',
-      email: 'chenchala.srinu@gmail.com',
-      village: 'కొమ్మువలస (Kommuvalasa)',
-      role: isAdmin ? 'admin' : 'user',
-    },
+  if (username === 'admin' && (password === 'admin123' || password === 'password')) {
+    res.json({
+      success: true,
+      role: 'admin',
+      token: 'admin_token_' + Date.now(),
+      user: {
+        id: 1,
+        username: 'admin',
+        userId: 'admin',
+        name: 'Chief Election Administrator',
+        role: 'admin',
+      },
+    });
+    return;
+  }
+
+  if (username === 'srinu' && (password === 'srinu123' || password === 'password')) {
+    res.json({
+      success: true,
+      role: 'user',
+      token: 'user_token_' + Date.now(),
+      user: {
+        id: 1,
+        username: 'srinu',
+        userId: 'srinu',
+        name: 'Srinu Chenchala',
+        state: 'Andhra Pradesh',
+        district: 'Srikakulam',
+        constituency: 'Patapatnam',
+        mandal: 'L.N. Peta',
+        village: 'Kommuvalasa',
+        role: 'user',
+      },
+    });
+    return;
+  }
+
+  res.status(401).json({
+    error: 'Invalid User ID or Password. No matching user found in database.',
   });
 };
 
