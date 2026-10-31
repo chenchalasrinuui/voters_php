@@ -44,24 +44,45 @@ app.get('/', (req, res) => {
 
 // Authentication Endpoint (matches PHP backend)
 const handleAuth = (req: Request, res: Response) => {
-  const username = (req.body.username || req.body.phone || req.body.email || '').toString().trim();
-  const password = (req.body.password || '').toString().trim();
+  const username = (
+    req.body.username ||
+    req.body.userId ||
+    req.body.user_id ||
+    req.body.userid ||
+    req.body.phone ||
+    req.body.mobile ||
+    req.body.email ||
+    req.body.user ||
+    req.body.id ||
+    ''
+  ).toString().trim();
+
+  const password = (
+    req.body.password ||
+    req.body.pwd ||
+    req.body.pass ||
+    ''
+  ).toString().trim();
 
   if (!username || !password) {
-    res.status(400).json({ error: 'Username and Password required' });
+    res.status(400).json({ error: 'User ID / Username and Password required' });
     return;
   }
 
+  const isAdmin = (username === 'admin');
   res.json({
     success: true,
-    role: username === 'admin' ? 'admin' : 'user',
+    role: isAdmin ? 'admin' : 'user',
     token: 'mock-jwt-token-2026',
     user: {
       id: 1,
       username,
-      name: username === 'admin' ? 'Chief Election Administrator' : 'శ్రీను చెంచల (Srinu Chenchala)',
+      userId: username,
+      name: isAdmin ? 'Chief Election Administrator' : 'శ్రీను చెంచల (Srinu Chenchala)',
+      phone: '9110383335',
+      email: 'chenchala.srinu@gmail.com',
       village: 'కొమ్మువలస (Kommuvalasa)',
-      role: username === 'admin' ? 'admin' : 'user',
+      role: isAdmin ? 'admin' : 'user',
     },
   });
 };
