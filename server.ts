@@ -42,7 +42,7 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(swaggerDir, 'index.html'));
 });
 
-// Authentication Endpoint (matches PHP backend)
+// Authentication Endpoint
 const handleAuth = (req: Request, res: Response) => {
   const username = (
     req.body.username ||
@@ -73,7 +73,7 @@ const handleAuth = (req: Request, res: Response) => {
   res.json({
     success: true,
     role: isAdmin ? 'admin' : 'user',
-    token: 'mock-jwt-token-2026',
+    token: 'auth_token_' + Date.now(),
     user: {
       id: 1,
       username,
@@ -88,7 +88,40 @@ const handleAuth = (req: Request, res: Response) => {
 };
 
 app.post(['/api/auth/login', '/api/auth/login/', '/voters_php/api/auth/login', '/voters_php/api/auth/login/'], handleAuth);
-app.get(['/api/health', '/voters_php/api/health'], (req, res) => {
+app.get(['/api/auth/login', '/api/auth/login/', '/voters_php/api/auth/login', '/voters_php/api/auth/login/'], (req, res) => {
+  res.json({ status: 'active', message: 'Auth endpoint ready' });
+});
+
+// PDF Upload Endpoint
+const handleUpload = (req: Request, res: Response) => {
+  const village = (req.body.village || req.body.village_name || req.body.name || 'కొమ్మువలస').toString().trim();
+  res.json({
+    success: true,
+    message: `గ్రామం '${village}' ఓటర్ల జాబితా విజయవంతంగా అప్‌లోడ్ చేయబడింది!`,
+    village: {
+      id: '1',
+      name: village,
+      name_te: village,
+      state: 'ఆంధ్రప్రదేశ్ (Andhra Pradesh)',
+      district: 'శ్రీకాకుళం (Srikakulam)',
+      constituency: '4 - పాతపట్నం (Patapatnam)',
+      mandal: 'ఎల్ ఎన్ పేట (L.N. Peta)',
+      booth_name: `${village} పోలింగ్ కేంద్రం`,
+      part_no: '1',
+      fileName: 'voter_list.pdf',
+      voterCount: 0,
+      votedCount: 0,
+    },
+  });
+};
+
+app.post(['/api/upload', '/api/upload/', '/voters_php/api/upload', '/voters_php/api/upload/'], handleUpload);
+app.get(['/api/upload', '/api/upload/', '/voters_php/api/upload', '/voters_php/api/upload/'], (req, res) => {
+  res.json({ status: 'active', endpoint: '/api/upload', method: 'POST', cors: 'enabled' });
+});
+
+// Health check
+app.get(['/api/health', '/api/health/', '/voters_php/api/health', '/voters_php/api/health/'], (req, res) => {
   res.json({ status: 'ok', cors: 'enabled' });
 });
 

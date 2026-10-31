@@ -1,19 +1,19 @@
 <?php
-// backend/routes/auth.php - Authentication API (User & Admin Login)
+// backend/routes/auth.php - Authentication API (User & Admin Login from Database)
 
 require_once __DIR__ . '/../cors.php';
 require_once __DIR__ . '/../database.php';
 
 header("Content-Type: application/json; charset=UTF-8");
 
-// Handle GET request (Browser / Health inspection)
+// Handle GET request (Route Health / Diagnostic check)
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     http_response_code(200);
     echo json_encode([
         'status' => 'active',
         'endpoint' => '/api/auth/login',
         'method' => 'POST',
-        'message' => 'Auth login route is ready. Send a POST request with JSON body { username / userId, password }.',
+        'message' => 'Auth login route is active. Database-driven authentication.',
         'cors' => 'enabled'
     ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     exit();
@@ -56,190 +56,135 @@ if (!$username || !$password) {
     exit();
 }
 
-// Helper: verify plain text, bcrypt, md5, sha1
-function verifyPasswordMatch($input, $stored) {
-    if (!$stored) return true;
-    if ($input === $stored) return true;
-    if (password_verify($input, $stored)) return true;
-    if (md5($input) === $stored) return true;
-    if (sha1($input) === $stored) return true;
-    if ($input === 'admin123' || $input === 'password' || $input === 'password123' || $input === 'Voters$1234') return true;
+// Helper: compare password against database value (supports plain text, bcrypt, md5, sha1)
+function checkPassword($input, $stored) {
+    if ($input === $stored) {
+        return true;
+    }
+    if (password_verify($input, $stored)) {
+        return true;
+    }
+    if (md5($input) === $stored) {
+        return true;
+    }
+    if (sha1($input) === $stored) {
+        return true;
+    }
     return false;
 }
 
+$db = new DB();
 $pdo = null;
+
 try {
-    $db = new DB();
     $pdo = $db->getPDO();
 } catch (Throwable $e) {
-    error_log("Remote DB connection error: " . $e->getMessage());
+    http_response_code(500);
+    echo json_encode([
+        'error' => 'డేటాబేస్ కనెక్షన్ లోపం (Database connection failed): ' . $e->getMessage()
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
 }
 
-// 1. Check in Admin table on Server DB
-if ($pdo) {
-    try {
-        $stmt = $pdo->prepare("SELECT * FROM admin WHERE username = ? OR email = ? OR phone = ? LIMIT 1");
-        $stmt->execute([$username, $username, $username]);
-        $admin = $stmt->fetch();
+$matchedUser = null;
+$matchedRole = 'user';
 
-        if ($admin && verifyPasswordMatch($password, $admin['password'])) {
-            echo json_encode([
-                'success' => true,
-                'role' => 'admin',
-                'token' => 'admin_session_' . md5($username . time()),
-                'user' => [
-                    'id' => (int)$admin['id'],
-                    'username' => $admin['username'],
-                    'userId' => $admin['username'],
-                    'name' => $admin['name'] ?? 'Chief Election Administrator',
-                    'role' => 'admin'
-                ]
-            ], JSON_UNESCAPED_UNICODE);
-            exit();
-        }
-    } catch (Throwable $e) {
-        // Fallback query if phone/email columns don't exist on admin table
-        try {
-            $stmt = $pdo->prepare("SELECT * FROM admin WHERE username = ? LIMIT 1");
-            $stmt->execute([$username]);
-            $admin = $stmt->fetch();
-            if ($admin && verifyPasswordMatch($password, $admin['password'])) {
-                echo json_encode([
-                    'success' => true,
-                    'role' => 'admin',
-                    'token' => 'admin_session_' . md5($username . time()),
-                    'user' => [
-                        'id' => (int)$admin['id'],
-                        'username' => $admin['username'],
-                        'userId' => $admin['username'],
-                        'name' => $admin['name'] ?? 'Chief Election Administrator',
-                        'role' => 'admin'
-                    ]
-                ], JSON_UNESCAPED_UNICODE);
-                exit();
-            }
-        } catch (Throwable $e2) {}
+// 1. Check in Admin table in Database
+try {
+    $stmt = $pdo->prepare("SELECT * FROM admin WHERE username = ? OR email = ? OR phone = ? LIMIT 1");
+    $stmt->execute([$username, $username, $username]);
+    $adminRow = $stmt->fetch();
+    if ($adminRow && checkPassword($password, $adminRow['password'])) {
+        $matchedUser = $adminRow;
+        $matchedRole = 'admin';
     }
+} catch (Throwable $e) {
+    // Fallback if admin table does not have email/phone columns
+    try {
+        $stmt = $pdo->prepare("SELECT * FROM admin WHERE username = ? LIMIT 1");
+        $stmt->execute([$username]);
+        $adminRow = $stmt->fetch();
+        if ($adminRow && checkPassword($password, $adminRow['password'])) {
+            $matchedUser = $adminRow;
+            $matchedRole = 'admin';
+        }
+    } catch (Throwable $e2) {}
 }
 
-// 2. Check in Users table on Server DB (by username, phone, or email)
-if ($pdo) {
+// 2. Check in Users table in Database (Created by Admin or Registered)
+if (!$matchedUser) {
     try {
         $stmt = $pdo->prepare("SELECT * FROM users WHERE username = ? OR phone = ? OR email = ? LIMIT 1");
         $stmt->execute([$username, $username, $username]);
-        $user = $stmt->fetch();
-
-        if ($user && verifyPasswordMatch($password, $user['password'])) {
-            if (isset($user['status']) && $user['status'] !== 'active') {
-                http_response_code(403);
-                echo json_encode([
-                    'error' => 'మీ ఖాతా నిలిపివేయబడింది (Your account has been deactivated by administrator)'
-                ], JSON_UNESCAPED_UNICODE);
-                exit();
-            }
-
-            echo json_encode([
-                'success' => true,
-                'role' => $user['role'] ?? 'user',
-                'token' => 'user_session_' . md5($username . time()),
-                'user' => [
-                    'id' => (int)$user['id'],
-                    'username' => $user['username'],
-                    'userId' => $user['username'],
-                    'name' => $user['name'],
-                    'phone' => $user['phone'] ?? '',
-                    'email' => $user['email'] ?? '',
-                    'state' => $user['state'] ?? 'ఆంధ్రప్రదేశ్ (Andhra Pradesh)',
-                    'district' => $user['district'] ?? 'శ్రీకాకుళం (Srikakulam)',
-                    'constituency' => $user['constituency'] ?? '4 - పాతపట్నం (Patapatnam)',
-                    'mandal' => $user['mandal'] ?? 'ఎల్ ఎన్ పేట (L.N. Peta)',
-                    'village' => $user['village'] ?? 'కొమ్మువలస (Kommuvalasa)',
-                    'role' => $user['role'] ?? 'user'
-                ]
-            ], JSON_UNESCAPED_UNICODE);
-            exit();
+        $userRow = $stmt->fetch();
+        if ($userRow && checkPassword($password, $userRow['password'])) {
+            $matchedUser = $userRow;
+            $matchedRole = $userRow['role'] ?? 'user';
         }
     } catch (Throwable $e) {
-        // Fallback query if only username column exists
+        // Fallback if users table does not have phone/email columns
         try {
             $stmt = $pdo->prepare("SELECT * FROM users WHERE username = ? LIMIT 1");
             $stmt->execute([$username]);
-            $user = $stmt->fetch();
-            if ($user && verifyPasswordMatch($password, $user['password'])) {
-                echo json_encode([
-                    'success' => true,
-                    'role' => $user['role'] ?? 'user',
-                    'token' => 'user_session_' . md5($username . time()),
-                    'user' => [
-                        'id' => (int)$user['id'],
-                        'username' => $user['username'],
-                        'userId' => $user['username'],
-                        'name' => $user['name'] ?? $user['username'],
-                        'role' => $user['role'] ?? 'user'
-                    ]
-                ], JSON_UNESCAPED_UNICODE);
-                exit();
+            $userRow = $stmt->fetch();
+            if ($userRow && checkPassword($password, $userRow['password'])) {
+                $matchedUser = $userRow;
+                $matchedRole = $userRow['role'] ?? 'user';
             }
         } catch (Throwable $e2) {}
     }
 }
 
-// 3. Check in Employees table on Server DB
-if ($pdo) {
+// 3. Check in Employees table in Database
+if (!$matchedUser) {
     try {
-        $stmt = $pdo->prepare("SELECT * FROM employees WHERE phone = ? OR email = ? LIMIT 1");
+        $stmt = $pdo->prepare("SELECT * FROM employees WHERE (email = ? OR phone = ?) AND is_active = 'T' LIMIT 1");
         $stmt->execute([$username, $username]);
-        $emp = $stmt->fetch();
-        if ($emp && verifyPasswordMatch($password, 'password123')) {
-            echo json_encode([
-                'success' => true,
-                'role' => $emp['role'] ?? 'Employee',
-                'token' => 'emp_session_' . md5($username . time()),
-                'user' => [
-                    'id' => (int)$emp['id'],
-                    'username' => $emp['phone'] ?: $emp['email'],
-                    'userId' => $emp['phone'] ?: $emp['email'],
-                    'name' => $emp['name'],
-                    'phone' => $emp['phone'],
-                    'email' => $emp['email'],
-                    'role' => $emp['role'] ?? 'Employee'
-                ]
-            ], JSON_UNESCAPED_UNICODE);
-            exit();
+        $empRow = $stmt->fetch();
+        if ($empRow && (empty($empRow['password']) || checkPassword($password, $empRow['password']))) {
+            $matchedUser = $empRow;
+            $matchedRole = $empRow['role'] ?? 'Employee';
         }
     } catch (Throwable $e) {}
 }
 
-// 4. Default Seed/Demo Accounts Fallback (admin or srikakulam_agent or owner email)
-if (
-    ($username === 'admin' && ($password === 'admin123' || $password === 'password' || $password === 'Voters$1234')) ||
-    ($username === 'srikakulam_agent' && ($password === 'password123' || $password === 'password')) ||
-    (($username === 'chenchala.srinu@gmail.com' || $username === '9110383335') && ($password === 'password123' || $password === 'Voters$1234' || $password === 'admin123'))
-) {
-    $isAdmin = ($username === 'admin');
+// Check if user account was found
+if ($matchedUser) {
+    // Check if account has been deactivated
+    if (isset($matchedUser['status']) && strtolower($matchedUser['status']) !== 'active') {
+        http_response_code(403);
+        echo json_encode([
+            'error' => 'మీ ఖాతా నిలిపివేయబడింది (Your account has been deactivated by administrator)'
+        ], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+
+    $loginIdentifier = $matchedUser['username'] ?? $matchedUser['phone'] ?? $matchedUser['email'] ?? $username;
+    $token = bin2hex(random_bytes(20));
+
     echo json_encode([
         'success' => true,
-        'role' => $isAdmin ? 'admin' : 'user',
-        'token' => 'demo_session_' . md5($username . time()),
+        'role' => $matchedRole,
+        'token' => $token,
         'user' => [
-            'id' => 1,
-            'username' => $username,
-            'userId' => $username,
-            'name' => $isAdmin ? 'Chief Election Administrator' : 'శ్రీను చెంచల (Srinu Chenchala)',
-            'phone' => '9110383335',
-            'email' => 'chenchala.srinu@gmail.com',
-            'state' => 'ఆంధ్రప్రదేశ్ (Andhra Pradesh)',
-            'district' => 'శ్రీకాకుళం (Srikakulam)',
-            'constituency' => '4 - పాతపట్నం (Patapatnam)',
-            'mandal' => 'ఎల్ ఎన్ పేట (L.N. Peta)',
-            'village' => 'కొమ్మువలస (Kommuvalasa)',
-            'role' => $isAdmin ? 'admin' : 'user'
+            'id' => (int)($matchedUser['id'] ?? 1),
+            'username' => $loginIdentifier,
+            'userId' => $loginIdentifier,
+            'name' => $matchedUser['name'] ?? $loginIdentifier,
+            'phone' => $matchedUser['phone'] ?? '',
+            'email' => $matchedUser['email'] ?? '',
+            'state' => $matchedUser['state'] ?? 'ఆంధ్రప్రదేశ్ (Andhra Pradesh)',
+            'district' => $matchedUser['district'] ?? 'శ్రీకాకుళం (Srikakulam)',
+            'constituency' => $matchedUser['constituency'] ?? '4 - పాతపట్నం (Patapatnam)',
+            'mandal' => $matchedUser['mandal'] ?? 'ఎల్ ఎన్ పేట (L.N. Peta)',
+            'village' => $matchedUser['village'] ?? 'కొమ్మువలస (Kommuvalasa)',
+            'role' => $matchedRole
         ]
     ], JSON_UNESCAPED_UNICODE);
     exit();
 }
 
-// Invalid Credentials
+// No matching user or password incorrect
 http_response_code(401);
 echo json_encode([
     'error' => 'చెల్లని యూజర్ ఐడీ లేదా పాస్‌వర్డ్ (Invalid User ID or Password. No matching user found in database.)'

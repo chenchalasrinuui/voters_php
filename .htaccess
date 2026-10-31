@@ -15,6 +15,20 @@
     RewriteCond %{REQUEST_METHOD} OPTIONS
     RewriteRule ^(.*)$ cors.php [QSA,L]
 
+    # Explicit routing for API endpoints before directory checking to avoid 301 trailing slash redirects
+    RewriteRule ^api/upload/?$ routes/upload.php [QSA,L]
+    RewriteRule ^api/auth/login/?$ routes/auth.php [QSA,L]
+    RewriteRule ^api/auth/?$ routes/auth.php [QSA,L]
+    RewriteRule ^api/voters/vote/?$ routes/voters.php?action=vote [QSA,L]
+    RewriteRule ^api/voters/flag/?$ routes/voters.php?action=flag [QSA,L]
+    RewriteRule ^api/voters/reset-votes/?$ routes/voters.php?action=reset-votes [QSA,L]
+    RewriteRule ^api/voters/edit/?$ routes/voters.php?action=edit [QSA,L]
+    RewriteRule ^api/voters/?$ routes/voters.php [QSA,L]
+    RewriteRule ^api/villages/?$ routes/villages.php [QSA,L]
+    RewriteRule ^api/admin/users/?$ routes/admin.php?action=users [QSA,L]
+    RewriteRule ^api/admin/stats/?$ routes/admin.php?action=stats [QSA,L]
+    RewriteRule ^api/health/?$ routes/health.php [QSA,L]
+
     # Serve existing physical files and directories
     RewriteCond %{REQUEST_FILENAME} -f [OR]
     RewriteCond %{REQUEST_FILENAME} -d
