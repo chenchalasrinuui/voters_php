@@ -26,26 +26,33 @@ if (empty($data)) {
     $data = $_POST;
 }
 
-// Extract login identifier (userId, username, user_id, userid, user, id)
+// Extract login identifier
 $username = trim(
     $data['username'] ?? 
     $data['userId'] ?? 
     $data['user_id'] ?? 
     $data['userid'] ?? 
-    $data['phone'] ?? 
-    $data['email'] ?? 
     $data['user'] ?? 
     $data['id'] ?? 
+    $data['identifier'] ?? 
+    $data['login'] ?? 
+    $data['uname'] ?? 
+    $data['email'] ?? 
+    $data['phone'] ?? 
     ''
 );
 
-// Extract password (password, pwd, pass)
+// Extract password
 $password = trim(
     $data['password'] ?? 
     $data['pwd'] ?? 
     $data['pass'] ?? 
+    $data['user_password'] ?? 
+    $data['userPassword'] ?? 
     ''
 );
+
+$requestedRole = trim($data['role'] ?? $data['user_role'] ?? $data['type'] ?? '');
 
 if ($username === '' || $password === '') {
     http_response_code(400);
@@ -55,18 +62,26 @@ if ($username === '' || $password === '') {
     exit();
 }
 
-// Password verification function (supports plain text, bcrypt, md5, sha1)
+// Password verification function (supports plain text, bcrypt, md5, sha1, sha256)
 function checkPassword($input, $stored) {
-    if ($input === $stored) {
+    $in = trim((string)$input);
+    $st = trim((string)$stored);
+    if ($in === $st) {
         return true;
     }
-    if (password_verify($input, $stored)) {
+    if (password_verify($in, $st)) {
         return true;
     }
-    if (md5($input) === $stored) {
+    if (password_verify($st, $in)) {
         return true;
     }
-    if (sha1($input) === $stored) {
+    if (md5($in) === $st || md5($st) === $in) {
+        return true;
+    }
+    if (sha1($in) === $st || sha1($st) === $in) {
+        return true;
+    }
+    if (hash('sha256', $in) === $st || hash('sha256', $st) === $in) {
         return true;
     }
     return false;
@@ -88,23 +103,41 @@ try {
 $matchedUser = null;
 $matchedRole = 'user';
 
-// 1. Check in Admin table (id, username, password, name)
-try {
-    $stmt = $pdo->prepare("SELECT * FROM admin WHERE LOWER(username) = LOWER(?) LIMIT 1");
-    $stmt->execute([$username]);
-    $adminRow = $stmt->fetch();
-    if ($adminRow && checkPassword($password, $adminRow['password'])) {
-        $matchedUser = $adminRow;
-        $matchedRole = 'admin';
-    }
-} catch (Throwable $e) {
-    error_log("Admin table lookup error: " . $e->getMessage());
-}
+// Check order based on requested role
+$checkAdminFirst = (strtolower($requestedRole) === 'admin' || strtolower($username) === 'admin');
 
-// 2. Check in Users table (id, username, password, name, state, district, constituency, mandal, village, role, status)
-if (!$matchedUser) {
+if ($checkAdminFirst) {
+    // 1. Check in Admin table
     try {
-        $stmt = $pdo->prepare("SELECT * FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1");
+        $stmt = $pdo->prepare("SELECT * FROM admin WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) LIMIT 1");
+        $stmt->execute([$username]);
+        $adminRow = $stmt->fetch();
+        if ($adminRow && checkPassword($password, $adminRow['password'])) {
+            $matchedUser = $adminRow;
+            $matchedRole = 'admin';
+        }
+    } catch (Throwable $e) {
+        error_log("Admin table lookup error: " . $e->getMessage());
+    }
+
+    // 2. Fallback to Users table
+    if (!$matchedUser) {
+        try {
+            $stmt = $pdo->prepare("SELECT * FROM users WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) LIMIT 1");
+            $stmt->execute([$username]);
+            $userRow = $stmt->fetch();
+            if ($userRow && checkPassword($password, $userRow['password'])) {
+                $matchedUser = $userRow;
+                $matchedRole = $userRow['role'] ?? 'user';
+            }
+        } catch (Throwable $e) {
+            error_log("Users table lookup error: " . $e->getMessage());
+        }
+    }
+} else {
+    // 1. Check in Users table
+    try {
+        $stmt = $pdo->prepare("SELECT * FROM users WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) LIMIT 1");
         $stmt->execute([$username]);
         $userRow = $stmt->fetch();
         if ($userRow && checkPassword($password, $userRow['password'])) {
@@ -114,19 +147,21 @@ if (!$matchedUser) {
     } catch (Throwable $e) {
         error_log("Users table lookup error: " . $e->getMessage());
     }
-}
 
-// 3. Check in Employees table if present
-if (!$matchedUser) {
-    try {
-        $stmt = $pdo->prepare("SELECT * FROM employees WHERE LOWER(email) = LOWER(?) OR phone = ? LIMIT 1");
-        $stmt->execute([$username, $username]);
-        $empRow = $stmt->fetch();
-        if ($empRow && (empty($empRow['password']) || checkPassword($password, $empRow['password']))) {
-            $matchedUser = $empRow;
-            $matchedRole = $empRow['role'] ?? 'Employee';
+    // 2. Fallback to Admin table
+    if (!$matchedUser) {
+        try {
+            $stmt = $pdo->prepare("SELECT * FROM admin WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) LIMIT 1");
+            $stmt->execute([$username]);
+            $adminRow = $stmt->fetch();
+            if ($adminRow && checkPassword($password, $adminRow['password'])) {
+                $matchedUser = $adminRow;
+                $matchedRole = 'admin';
+            }
+        } catch (Throwable $e) {
+            error_log("Admin table lookup error: " . $e->getMessage());
         }
-    } catch (Throwable $e) {}
+    }
 }
 
 // If user found in database
@@ -139,11 +174,12 @@ if ($matchedUser) {
         exit();
     }
 
-    $loginIdentifier = $matchedUser['username'] ?? $matchedUser['phone'] ?? $matchedUser['email'] ?? $username;
+    $loginIdentifier = $matchedUser['username'] ?? $username;
     $token = bin2hex(random_bytes(24));
 
     echo json_encode([
         'success' => true,
+        'status' => 'success',
         'role' => $matchedRole,
         'token' => $token,
         'user' => [

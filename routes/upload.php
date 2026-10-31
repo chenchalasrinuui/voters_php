@@ -1,8 +1,9 @@
 <?php
-// backend/routes/upload.php - Hierarchical PDF Upload and Village Registration
+// backend/routes/upload.php - Hierarchical PDF Upload, Voter Extraction & Database Storage
 
 require_once __DIR__ . '/../cors.php';
 require_once __DIR__ . '/../database.php';
+require_once __DIR__ . '/../pdf_extractor.php';
 
 header("Content-Type: application/json; charset=UTF-8");
 
@@ -13,7 +14,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         'status' => 'active',
         'endpoint' => '/api/upload',
         'method' => 'POST',
-        'message' => 'PDF Upload route is active and ready. Send multipart/form-data with file and village details.',
+        'message' => 'PDF Upload & Voter Extraction route is active and ready.',
         'cors' => 'enabled'
     ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     exit();
@@ -50,7 +51,7 @@ if (!$file || !isset($file['error']) || $file['error'] !== UPLOAD_ERR_OK) {
     http_response_code(400);
     $errCode = $file['error'] ?? 'NO_FILE';
     echo json_encode([
-        'error' => 'దయచేసి సరైన PDF ఫైల్‌ను ఎంచుకోండి (Valid PDF file required. Upload code: ' . $errCode . ')'
+        'error' => 'దయచేసి సరైన PDF ఫైల్‌ను ఎంచుకోండి (Valid PDF file required. Code: ' . $errCode . ')'
     ], JSON_UNESCAPED_UNICODE);
     exit();
 }
@@ -86,7 +87,6 @@ $fileName = $timestamp . '_' . $safeName;
 $targetPath = $targetDir . '/' . $fileName;
 
 if (!move_uploaded_file($file['tmp_name'], $targetPath)) {
-    // If move failed, try copy as fallback
     if (!copy($file['tmp_name'], $targetPath)) {
         http_response_code(500);
         echo json_encode(['error' => 'ఫైల్ భద్రపరచడంలో లోపం ఏర్పడింది (Failed to save uploaded file)'], JSON_UNESCAPED_UNICODE);
@@ -98,6 +98,7 @@ try {
     $db = new DB();
     $pdo = $db->getPDO();
 
+    // 1. Register Village in database
     $ins = $pdo->prepare("
         INSERT INTO villages (user_id, village_name, village_name_te, state, district, constituency, mandal, booth_name, part_no, pdf_filename, pdf_path)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -117,9 +118,41 @@ try {
     ]);
     $newVillageId = (int)$pdo->lastInsertId();
 
+    // 2. Extract Voters from PDF (Telugu & English names, EPIC, relation, house no, age, gender)
+    $voters = PdfExtractor::extractVoters($targetPath, $newVillageId, $userId, $village);
+    $insertedCount = 0;
+
+    if (!empty($voters)) {
+        $voterStmt = $pdo->prepare("
+            INSERT INTO voters 
+            (village_id, user_id, sl_no, epic, name, name_en, relation_type, relation_name, relation_name_en, house_no, age, gender, ward_no, section_name, is_voted, flag_color)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'none')
+        ");
+
+        foreach ($voters as $v) {
+            $voterStmt->execute([
+                $newVillageId,
+                $userId,
+                $v['sl_no'],
+                $v['epic'],
+                $v['name'],
+                $v['name_en'],
+                $v['relation_type'],
+                $v['relation_name'],
+                $v['relation_name_en'],
+                $v['house_no'],
+                $v['age'],
+                $v['gender'],
+                $v['ward_no'],
+                $v['section_name']
+            ]);
+            $insertedCount++;
+        }
+    }
+
     echo json_encode([
         'success' => true,
-        'message' => "గ్రామం '{$village}' ఓటర్ల జాబితా విజయవంతంగా అప్‌లోడ్ చేయబడింది!",
+        'message' => "గ్రామం '{$village}' ఓటర్ల జాబితా విజయవంతంగా అప్‌లోడ్ చేయబడింది! {$insertedCount} మంది ఓటర్లు నమోదు చేయబడ్డారు.",
         'village' => [
             'id' => (string)$newVillageId,
             'name' => $village,
@@ -133,9 +166,10 @@ try {
             'fileName' => $origName,
             'filePath' => $relativeSubDir . '/' . $fileName,
             'isDefault' => false,
-            'voterCount' => 0,
+            'voterCount' => $insertedCount,
             'votedCount' => 0
-        ]
+        ],
+        'extractedCount' => $insertedCount
     ], JSON_UNESCAPED_UNICODE);
     exit();
 } catch (Throwable $e) {
