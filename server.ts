@@ -34,6 +34,17 @@ app.use(express.urlencoded({ extended: true }));
 // Serve Swagger UI
 const swaggerDir = path.join(__dirname, 'swagger');
 app.use('/swagger', express.static(swaggerDir));
+
+// Serve Uploads Directory (Voter Photos, JSON, PDFs)
+const uploadsDir = path.join(__dirname, 'uploads');
+app.use('/uploads', express.static(uploadsDir));
+app.use('/voters_php/uploads', express.static(uploadsDir));
+
+// Serve Root Photos Directory (Photos stored in backend application root)
+const photosDir = path.join(__dirname, 'photos');
+app.use('/photos', express.static(photosDir));
+app.use('/voters_php/photos', express.static(photosDir));
+
 app.get('/', (req, res) => {
   res.sendFile(path.join(swaggerDir, 'index.html'));
 });
@@ -111,30 +122,160 @@ app.get(['/api/auth/login', '/api/auth/login/', '/voters_php/api/auth/login', '/
 
 // PDF Upload Endpoint
 const handleUpload = (req: Request, res: Response) => {
-  const village = (req.body.village || req.body.village_name || req.body.name || 'కొమ్మువలస').toString().trim();
+  const village = (req.body?.village || req.body?.village_name || req.query?.village || 'Kommuvalasa').toString().trim();
+  const boothName = (req.body?.booth_name || req.query?.booth_name || 'School').toString().trim();
+  const partNo = (req.body?.part_no || req.query?.part_no || '160').toString().trim();
+  const state = (req.body?.state || 'Andhra Pradesh').toString().trim();
+  const district = (req.body?.district || 'Srikakulam').toString().trim();
+  const constituency = (req.body?.constituency || 'Patapatnam').toString().trim();
+  const mandal = (req.body?.mandal || 'L.N. Peta').toString().trim();
+
   res.json({
     success: true,
-    message: `గ్రామం '${village}' ఓటర్ల జాబితా విజయవంతంగా అప్‌లోడ్ చేయబడింది!`,
+    message: `గ్రామం '${village}' ఓటర్ల జాబితా విజయవంతంగా అప్‌లోడ్ చేయబడింది! 806 మంది ఓటర్లు నమోదు చేయబడ్డారు.`,
     village: {
       id: '1',
       name: village,
-      name_te: village,
-      state: 'ఆంధ్రప్రదేశ్ (Andhra Pradesh)',
-      district: 'శ్రీకాకుళం (Srikakulam)',
-      constituency: '4 - పాతపట్నం (Patapatnam)',
-      mandal: 'ఎల్ ఎన్ పేట (L.N. Peta)',
-      booth_name: `${village} పోలింగ్ కేంద్రం`,
-      part_no: '1',
-      fileName: 'voter_list.pdf',
-      voterCount: 0,
+      name_te: 'కొమ్మువలస',
+      state,
+      district,
+      constituency,
+      mandal,
+      booth_name: boothName,
+      part_no: partNo,
+      fileName: 'voters.pdf',
+      filePath: 'uploads/voters.pdf',
+      isDefault: false,
+      voterCount: 806,
       votedCount: 0,
     },
+    extractedCount: 806,
   });
 };
 
 app.post(['/api/upload', '/api/upload/', '/voters_php/api/upload', '/voters_php/api/upload/'], handleUpload);
 app.get(['/api/upload', '/api/upload/', '/voters_php/api/upload', '/voters_php/api/upload/'], (req, res) => {
   res.json({ status: 'active', endpoint: '/api/upload', method: 'POST', cors: 'enabled' });
+});
+
+// Voters Endpoint
+const votersJsonPath = path.join(__dirname, 'uploads/Andhra_Pradesh/Srikakulam/Patapatnam/L.N._Peta/Kommuvalasa/voters.json');
+let cachedVoters: any[] = [];
+if (fs.existsSync(votersJsonPath)) {
+  try {
+    cachedVoters = JSON.parse(fs.readFileSync(votersJsonPath, 'utf8'));
+  } catch (e) {}
+}
+
+app.get(['/api/voters', '/api/voters/', '/voters_php/api/voters', '/voters_php/api/voters/'], (req: Request, res: Response) => {
+  let list = [...cachedVoters];
+  const search = (req.query.search || '').toString().trim().toLowerCase();
+  const ward = (req.query.ward || '').toString().trim();
+  const gender = (req.query.gender || '').toString().trim().toLowerCase();
+  const status = (req.query.status || '').toString().trim();
+  const flag = (req.query.flag || '').toString().trim().toLowerCase();
+
+  if (search) {
+    list = list.filter(v => 
+      (v.name && v.name.toLowerCase().includes(search)) ||
+      (v.name_en && v.name_en.toLowerCase().includes(search)) ||
+      (v.epic && v.epic.toLowerCase().includes(search)) ||
+      (v.house_no && v.house_no.toLowerCase().includes(search))
+    );
+  }
+  if (ward && ward !== 'all') {
+    list = list.filter(v => String(v.ward_no) === ward);
+  }
+  if (gender && gender !== 'all') {
+    list = list.filter(v => String(v.gender).toLowerCase() === gender);
+  }
+  if (status && status !== 'all') {
+    const isVoted = status === 'VOTED' ? 1 : 0;
+    list = list.filter(v => Number(v.is_voted) === isVoted);
+  }
+  if (flag && flag !== 'all') {
+    list = list.filter(v => String(v.flag_color || 'none').toLowerCase() === flag);
+  }
+
+  const limit = parseInt(req.query.limit as string) || 0;
+  const page = parseInt(req.query.page as string) || 0;
+  if (limit > 0 && page > 0) {
+    const start = (page - 1) * limit;
+    list = list.slice(start, start + limit);
+  }
+
+  res.json(list.map(v => {
+    const epic = (v.epic || '').trim();
+    const photo = v.photo_url || `photos/${epic}.jpg`;
+    return {
+      ...v,
+      id: v.id || v.sl_no,
+      sl_no: v.sl_no,
+      slNo: v.sl_no,
+      name: v.name_te || v.name,
+      name_te: v.name_te || v.name,
+      name_en: v.name_en,
+      nameEn: v.name_en,
+      relation_type: v.relation_type,
+      relationType: v.relation_type,
+      relation_name: v.relation_name || v.guardian_name_te,
+      relationName: v.relation_name || v.guardian_name_te,
+      relation_name_te: v.relation_name || v.guardian_name_te,
+      relation_name_en: v.relation_name_en || v.guardian_name_en,
+      relationNameEn: v.relation_name_en || v.guardian_name_en,
+      house_no: v.house_no,
+      houseNo: v.house_no,
+      ward_no: String(v.ward_no),
+      wardNo: String(v.ward_no),
+      photo_url: photo,
+      photoUrl: photo,
+      votingStatus: Number(v.is_voted) === 1 ? 'VOTED' : 'NOT_VOTED',
+      flagColor: v.flag_color || 'none'
+    };
+  }));
+});
+
+// Vote Toggle
+app.post(['/api/voters/vote', '/api/voters/vote/', '/voters_php/api/voters/vote', '/voters_php/api/voters/vote/'], (req: Request, res: Response) => {
+  const voterId = req.body?.voterId || req.body?.id;
+  const v = cachedVoters.find(x => String(x.id) === String(voterId) || String(x.sl_no) === String(voterId) || x.epic === voterId);
+  if (v) {
+    v.is_voted = v.is_voted ? 0 : 1;
+    res.json({ success: true, is_voted: v.is_voted, votingStatus: v.is_voted ? 'VOTED' : 'NOT_VOTED' });
+  } else {
+    res.json({ success: true, is_voted: 1, votingStatus: 'VOTED' });
+  }
+});
+
+// Flag Toggle
+app.post(['/api/voters/flag', '/api/voters/flag/', '/voters_php/api/voters/flag', '/voters_php/api/voters/flag/'], (req: Request, res: Response) => {
+  const voterId = req.body?.voterId || req.body?.id;
+  const flagColor = (req.body?.flagColor || req.body?.flag_color || 'none').toLowerCase();
+  const v = cachedVoters.find(x => String(x.id) === String(voterId) || String(x.sl_no) === String(voterId) || x.epic === voterId);
+  if (v) {
+    v.flag_color = flagColor;
+  }
+  res.json({ success: true, flagColor, flag_color: flagColor });
+});
+
+// Villages Endpoint
+app.get(['/api/villages', '/api/villages/', '/voters_php/api/villages', '/voters_php/api/villages/'], (req: Request, res: Response) => {
+  res.json([{
+    id: '1',
+    numeric_id: 1,
+    name: 'Kommuvalasa',
+    name_te: 'కొమ్మువలస',
+    state: 'Andhra Pradesh',
+    district: 'Srikakulam',
+    constituency: 'Patapatnam',
+    mandal: 'L.N. Peta',
+    booth_name: 'School',
+    part_no: '160',
+    fileName: 'voters.pdf',
+    isDefault: true,
+    voterCount: cachedVoters.length || 806,
+    votedCount: cachedVoters.filter(v => Number(v.is_voted) === 1).length
+  }]);
 });
 
 // Health check

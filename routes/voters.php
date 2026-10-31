@@ -272,22 +272,42 @@ if ($method === 'GET') {
             }
         }
 
-        // Format for UI
+        // Format for UI with strict language isolation
         $mapped = array_map(function($r) {
+            $nameTe = preg_replace('/[A-Za-z0-9]/', '', $r['name_te'] ?? $r['name'] ?? '');
+            $nameTe = trim(preg_replace('/\s+/', ' ', $nameTe));
+
+            $nameEn = preg_replace('/[\x{0C00}-\x{0C7F}]/u', '', $r['name_en'] ?? '');
+            $nameEn = trim(preg_replace('/\s+/', ' ', $nameEn));
+
+            $relTe = preg_replace('/[A-Za-z0-9]/', '', $r['relation_name'] ?? $r['guardian_name_te'] ?? '');
+            $relTe = trim(preg_replace('/\s+/', ' ', $relTe));
+
+            $relEn = preg_replace('/[\x{0C00}-\x{0C7F}]/u', '', $r['relation_name_en'] ?? $r['guardian_name_en'] ?? '');
+            $relEn = trim(preg_replace('/\s+/', ' ', $relEn));
+
+            $epic = trim($r['epic'] ?? '');
+            $photo = $r['photo_url'] ?? '';
+            if (empty($photo)) {
+                $photo = "photos/{$epic}.jpg";
+            }
+
             return [
                 'id' => (int)$r['id'],
                 'sl_no' => (int)$r['sl_no'],
                 'slNo' => (int)$r['sl_no'],
-                'epic' => $r['epic'],
-                'name' => $r['name'],
-                'name_en' => $r['name_en'] ?? $r['name'],
-                'nameEn' => $r['name_en'] ?? $r['name'],
+                'epic' => $epic,
+                'name' => $nameTe,
+                'name_te' => $nameTe,
+                'name_en' => $nameEn,
+                'nameEn' => $nameEn,
                 'relation_type' => $r['relation_type'] ?? 'Father',
                 'relationType' => $r['relation_type'] ?? 'Father',
-                'relation_name' => $r['relation_name'] ?? '',
-                'relationName' => $r['relation_name'] ?? '',
-                'relation_name_en' => $r['relation_name_en'] ?? '',
-                'relationNameEn' => $r['relation_name_en'] ?? '',
+                'relation_name' => $relTe,
+                'relationName' => $relTe,
+                'relation_name_te' => $relTe,
+                'relation_name_en' => $relEn,
+                'relationNameEn' => $relEn,
                 'house_no' => $r['house_no'] ?? '1-1',
                 'houseNo' => $r['house_no'] ?? '1-1',
                 'age' => (int)$r['age'],
@@ -295,8 +315,8 @@ if ($method === 'GET') {
                 'ward_no' => (string)$r['ward_no'],
                 'wardNo' => (string)$r['ward_no'],
                 'section_name' => $r['section_name'] ?? '',
-                'photo_url' => $r['photo_url'] ?? '',
-                'photoUrl' => $r['photo_url'] ?? '',
+                'photo_url' => $photo,
+                'photoUrl' => $photo,
                 'is_voted' => (int)($r['is_voted'] ?? 0),
                 'votingStatus' => ($r['is_voted'] ?? 0) == 1 ? 'VOTED' : 'NOT_VOTED',
                 'flag_color' => $r['flag_color'] ?? 'none',

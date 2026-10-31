@@ -87,18 +87,37 @@ class PdfExtractor
 
     /**
      * Transliterates Telugu Unicode text to English phonetically
+    /**
+     * Strictly removes any English/Latin characters to keep pure Telugu
      */
-    public static function transliterateTeluguToEnglish($text)
+    public static function cleanTeluguOnly($str)
     {
-        if (!$text) return '';
-        $clean = trim($text);
+        if (!$str) return '';
+        // Strip English Latin characters and digits
+        $clean = preg_replace('/[A-Za-z0-9]/', '', $str);
+        // Normalize whitespace
+        $clean = preg_replace('/[\t\r\n]+/', ' ', $clean);
+        $clean = preg_replace('/\s+/', ' ', $clean);
+        // Keep only Telugu unicode range \x{0C00}-\x{0C7F} and spaces
+        $clean = preg_replace('/[^\x{0C00}-\x{0C7F}\s]/u', '', $clean);
+        return trim($clean);
+    }
 
-        // Word-level transliteration for known Telugu names/surnames
+    /**
+     * Strictly removes any Telugu characters to keep pure English
+     */
+    public static function cleanEnglishOnly($str)
+    {
+        if (!$str) return '';
+        // Transliterate known Telugu words
+        $clean = $str;
         foreach (self::$nameMap as $te => $en) {
             $clean = str_replace($te, $en . ' ', $clean);
         }
-
-        // Clean up whitespace
+        // Strip all Telugu characters \x{0C00}-\x{0C7F}
+        $clean = preg_replace('/[\x{0C00}-\x{0C7F}]/u', '', $clean);
+        // Strip non-Latin
+        $clean = preg_replace('/[^A-Za-z\s]/', '', $clean);
         $clean = preg_replace('/\s+/', ' ', $clean);
         return ucwords(strtolower(trim($clean)));
     }
@@ -116,21 +135,32 @@ class PdfExtractor
             if (!empty($cached) && is_array($cached)) {
                 $voters = [];
                 foreach ($cached as $item) {
+                    $teName = self::cleanTeluguOnly($item['name'] ?? $item['name_te'] ?? '');
+                    $enName = self::cleanEnglishOnly($item['name_en'] ?? $item['nameEn'] ?? '');
+                    $teRel = self::cleanTeluguOnly($item['relation_name'] ?? $item['guardian_name_te'] ?? '');
+                    $enRel = self::cleanEnglishOnly($item['relation_name_en'] ?? $item['guardian_name_en'] ?? '');
+                    $epic = trim($item['epic'] ?? '');
+                    $slNo = (int)($item['sl_no'] ?? $item['slNo'] ?? 1);
+
                     $voters[] = [
                         'village_id' => $villageId,
                         'user_id' => $userId,
-                        'sl_no' => (int)$item['sl_no'],
-                        'epic' => $item['epic'],
-                        'name' => $item['name'],
-                        'name_en' => $item['name_en'] ?: self::transliterateTeluguToEnglish($item['name']),
+                        'sl_no' => $slNo,
+                        'epic' => $epic,
+                        'name' => $teName,
+                        'name_te' => $teName,
+                        'name_en' => $enName,
                         'relation_type' => $item['relation_type'] ?? 'Father',
-                        'relation_name' => $item['relation_name'] ?? '',
-                        'relation_name_en' => $item['relation_name_en'] ?? self::transliterateTeluguToEnglish($item['relation_name'] ?? ''),
+                        'relation_name' => $teRel,
+                        'guardian_name_te' => $teRel,
+                        'relation_name_en' => $enRel,
+                        'guardian_name_en' => $enRel,
                         'house_no' => $item['house_no'] ?? '1-1',
                         'age' => (int)($item['age'] ?? 30),
                         'gender' => $item['gender'] ?? 'Male',
                         'ward_no' => (string)($item['ward_no'] ?? '1'),
                         'section_name' => $item['section_name'] ?? ($villageName . ' - వార్డు ' . ($item['ward_no'] ?? '1')),
+                        'photo_url' => $item['photo_url'] ?? ("photos/{$epic}.jpg"),
                         'is_voted' => 0,
                         'flag_color' => 'none'
                     ];
@@ -139,8 +169,6 @@ class PdfExtractor
             }
         }
 
-        // 2. Fallback: Parse from PDF text if available
-        $voters = [];
-        return $voters;
+        return [];
     }
 }
