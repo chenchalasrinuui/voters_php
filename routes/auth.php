@@ -38,13 +38,12 @@ if (!$username || !$password) {
     exit();
 }
 
-$db = new DB();
 $pdo = null;
-
 try {
+    $db = new DB();
     $pdo = $db->getPDO();
-} catch (Exception $e) {
-    // If remote database connection fails, fallback gracefully to mock credentials
+} catch (Throwable $e) {
+    // If database connection fails, log and fallback gracefully
     error_log("DB connection error in auth.php: " . $e->getMessage());
 }
 
@@ -88,7 +87,7 @@ if ($pdo) {
             ], JSON_UNESCAPED_UNICODE);
             exit();
         }
-    } catch (Exception $e) {
+    } catch (Throwable $e) {
         error_log("Admin auth error: " . $e->getMessage());
     }
 }
@@ -145,7 +144,7 @@ if ($pdo) {
             ], JSON_UNESCAPED_UNICODE);
             exit();
         }
-    } catch (Exception $e) {
+    } catch (Throwable $e) {
         error_log("User auth error: " . $e->getMessage());
     }
 }

@@ -1,8 +1,8 @@
 <IfModule mod_headers.c>
-    # Ensure Apache outputs CORS headers on ALL responses (including 200, 204, 301 redirects, 404, 500)
-    SetEnvIfNoCase Origin "^(.*)$" CORS_ORIGIN=$1
-    Header always set Access-Control-Allow-Origin "%{CORS_ORIGIN}e" env=CORS_ORIGIN
-    Header always set Access-Control-Allow-Credentials "true" env=CORS_ORIGIN
+    # Dynamic Origin reflection for React on localhost:3000, 5173, etc.
+    SetEnvIfNoCase Origin "^(http(s)?://.*)$" CLIENT_ORIGIN=$1
+    Header always set Access-Control-Allow-Origin "%{CLIENT_ORIGIN}e" env=CLIENT_ORIGIN
+    Header always set Access-Control-Allow-Credentials "true" env=CLIENT_ORIGIN
     Header always set Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     Header always set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma, X-User-Id, X-User-Role, X-User-Numeric-Id"
     Header always set Access-Control-Max-Age "86400"
@@ -11,16 +11,16 @@
 <IfModule mod_rewrite.c>
     RewriteEngine On
 
-    # Respond to preflight OPTIONS requests immediately
+    # Route preflight OPTIONS to cors.php
     RewriteCond %{REQUEST_METHOD} OPTIONS
-    RewriteRule ^(.*)$ - [R=204,L]
+    RewriteRule ^(.*)$ cors.php [QSA,L]
 
     # Serve existing physical files and directories
     RewriteCond %{REQUEST_FILENAME} -f [OR]
     RewriteCond %{REQUEST_FILENAME} -d
     RewriteRule ^ - [L]
 
-    # Send all other API requests through router.php (or routes.php)
+    # Send all other API requests through router.php
     RewriteRule ^api(?:/.*)?$ router.php [QSA,L]
     RewriteRule ^backend(?:/.*)?$ router.php [QSA,L]
 </IfModule>
