@@ -2,9 +2,85 @@ import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import sharp from 'sharp';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Pre-load default 6.7KB portrait buffer as instant sync fallback
+let defaultPortraitBuf: Buffer;
+try {
+  const b64Path = path.join(__dirname, 'data', 'default_portrait_b64.txt');
+  if (fs.existsSync(b64Path)) {
+    defaultPortraitBuf = Buffer.from(fs.readFileSync(b64Path, 'utf8').trim(), 'base64');
+  } else {
+    defaultPortraitBuf = Buffer.from('ffd8ffe000104a46494600010101004800480000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc000110800b4009603012200021101031101ffda000c03010002110311003f00fbfefefeb7d55f00ffd9', 'hex');
+  }
+} catch (e) {
+  defaultPortraitBuf = Buffer.from('ffd8ffe000104a46494600010101004800480000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc000110800b4009603012200021101031101ffda000c03010002110311003f00fbfefefeb7d55f00ffd9', 'hex');
+}
+
+async function createVoterPortraitJpg(epic: string, gender: string = 'Male'): Promise<Buffer> {
+  try {
+    const isFemale = gender.toLowerCase() === 'female' || gender.includes('స్త్రీ') || gender.includes('మహిళ');
+    const bgColors = ['#1e3a8a', '#0f766e', '#374151', '#4338ca', '#7c2d12', '#14532d'];
+    let sum = 0;
+    for (let i = 0; i < epic.length; i++) sum += epic.charCodeAt(i);
+    const bgColor = bgColors[sum % bgColors.length];
+    const skinTones = ['#e0a96d', '#d28b57', '#c68642', '#b87333', '#e8beac'];
+    const skin = skinTones[sum % skinTones.length];
+    const hair = '#171717';
+    const clothes = ['#f8fafc', '#dbeafe', '#fef3c7', '#e0e7ff', '#ffedd5'][sum % 5];
+
+    const hairSvg = isFemale ? `
+      <ellipse cx="75" cy="62" rx="34" ry="40" fill="${hair}"/>
+      <circle cx="50" cy="85" r="14" fill="${hair}"/>
+      <circle cx="100" cy="85" r="14" fill="${hair}"/>
+      <ellipse cx="75" cy="40" rx="20" ry="10" fill="${hair}"/>
+    ` : `
+      <ellipse cx="75" cy="50" rx="32" ry="24" fill="${hair}"/>
+      <rect x="44" y="48" width="10" height="26" fill="${hair}"/>
+      <rect x="96" y="48" width="10" height="26" fill="${hair}"/>
+    `;
+
+    const svg = `<svg width="150" height="180" viewBox="0 0 150 180" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="${bgColor}" stop-opacity="0.85"/>
+          <stop offset="100%" stop-color="#0b0f19" stop-opacity="0.95"/>
+        </linearGradient>
+      </defs>
+      <rect width="150" height="180" fill="url(#bg)"/>
+      <rect width="150" height="180" fill="none" stroke="#64748b" stroke-width="2"/>
+      ${hairSvg}
+      <!-- Body/Shoulders -->
+      <path d="M 15,180 C 15,128 45,120 75,120 C 105,120 135,128 135,180 Z" fill="${clothes}"/>
+      <path d="M 60,120 L 75,142 L 90,120 Z" fill="${skin}"/>
+      <!-- Neck -->
+      <rect x="66" y="96" width="18" height="26" fill="${skin}"/>
+      <!-- Face -->
+      <ellipse cx="75" cy="74" rx="26" ry="32" fill="${skin}"/>
+      <!-- Eyes -->
+      <ellipse cx="65" cy="72" rx="3.5" ry="2.2" fill="#1e293b"/>
+      <ellipse cx="85" cy="72" rx="3.5" ry="2.2" fill="#1e293b"/>
+      <!-- Eyebrows -->
+      <path d="M 60,67 Q 65,64 70,67" stroke="${hair}" stroke-width="1.8" fill="none"/>
+      <path d="M 80,67 Q 85,64 90,67" stroke="${hair}" stroke-width="1.8" fill="none"/>
+      <!-- Nose -->
+      <path d="M 75,72 L 73,81 L 78,81" stroke="#a16207" stroke-width="1.2" fill="none"/>
+      <!-- Lips -->
+      <path d="M 68,89 Q 75,93 82,89" stroke="#991b1b" stroke-width="1.8" fill="none"/>
+      <!-- EPIC ID Bar at bottom -->
+      <rect x="4" y="154" width="142" height="22" rx="3" fill="#ffffff" opacity="0.92"/>
+      <rect x="4" y="154" width="142" height="22" rx="3" fill="none" stroke="#94a3b8" stroke-width="1"/>
+      <text x="75" y="169" font-family="monospace, sans-serif" font-weight="bold" font-size="11" fill="#0f172a" text-anchor="middle" letter-spacing="1">${epic}</text>
+    </svg>`;
+
+    return await sharp(Buffer.from(svg)).jpeg({ quality: 90 }).toBuffer();
+  } catch (err) {
+    return defaultPortraitBuf;
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -941,7 +1017,6 @@ const handleUpload = (req: Request, res: Response) => {
   }
 
   // Create photo files with voter ID number with extension inside village folder
-  const sample1x1Jpg = Buffer.from('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=', 'base64');
   let photoCount = 0;
 
   for (const v of cachedVoters) {
@@ -957,10 +1032,16 @@ const handleUpload = (req: Request, res: Response) => {
         try {
           fs.copyFileSync(projectPhoto, photoFilePath);
         } catch (e) {
-          fs.writeFileSync(photoFilePath, sample1x1Jpg);
+          fs.writeFileSync(photoFilePath, defaultPortraitBuf);
         }
       } else {
-        fs.writeFileSync(photoFilePath, sample1x1Jpg);
+        fs.writeFileSync(photoFilePath, defaultPortraitBuf);
+        // Asynchronously render custom portrait with exact voter ID badge
+        createVoterPortraitJpg(safeEpic, v.gender || 'Male').then(buf => {
+          try {
+            fs.writeFileSync(photoFilePath, buf);
+          } catch (err) {}
+        }).catch(() => {});
       }
     }
 
