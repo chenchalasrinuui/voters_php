@@ -81,7 +81,10 @@ if (strpos($uri, '/api/admin') === 0 || $uri === '/backend/admin.php') {
 
 // Multi-village routes (/api/villages/*)
 if (strpos($uri, '/api/villages') === 0) {
-    if (preg_match('#^/api/villages/delete/?$#', $uri)) {
+    if (preg_match('#^/api/villages/delete/(\d+)/?$#', $uri, $matches)) {
+        $_GET['action'] = 'delete';
+        $_GET['delete_id'] = $matches[1];
+    } elseif (preg_match('#^/api/villages/delete/?$#', $uri)) {
         $_GET['action'] = 'delete';
     } elseif (preg_match('#^/api/villages/(\d+)/?$#', $uri, $matches)) {
         $_GET['delete_id'] = $matches[1];

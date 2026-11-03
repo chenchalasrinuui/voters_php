@@ -681,24 +681,36 @@ app.post(villagesPaths, (req: Request, res: Response) => {
 const villageDeletePaths = [
   '/api/villages/delete',
   '/api/villages/delete/',
+  '/api/villages/delete/:id',
   '/api/villages/:id',
   '/voters_php/api/villages/delete',
+  '/voters_php/api/villages/delete/',
+  '/voters_php/api/villages/delete/:id',
   '/voters_php/api/villages/:id',
 ];
 
-app.delete(villageDeletePaths, (req: Request, res: Response) => {
-  const vId = String(req.params.id || req.query.delete_id || req.query.id || req.body?.id || '');
-  villages = villages.filter(v => v.id !== vId && String(v.numeric_id) !== vId);
-  cachedVoters = cachedVoters.filter(v => String(v.village_id) !== vId);
-  res.json({ success: true, message: 'గ్రామం మరియు ఓటర్ల డేటా తొలగించబడింది' });
-});
+const handleVillageDelete = (req: Request, res: Response) => {
+  const vId = String(
+    req.params.id ||
+    req.query.delete_id ||
+    req.query.id ||
+    req.query.village_id ||
+    req.query.villageId ||
+    req.body?.id ||
+    req.body?.delete_id ||
+    req.body?.village_id ||
+    req.body?.villageId ||
+    ''
+  );
+  if (vId) {
+    villages = villages.filter(v => v.id !== vId && String(v.numeric_id) !== vId);
+    cachedVoters = cachedVoters.filter(v => String(v.village_id) !== vId);
+  }
+  res.json({ success: true, id: vId, message: 'గ్రామం మరియు ఓటర్ల డేటా తొలగించబడింది' });
+};
 
-app.post('/api/villages/delete', (req: Request, res: Response) => {
-  const vId = String(req.query.delete_id || req.query.id || req.body?.id || req.body?.village_id || '');
-  villages = villages.filter(v => v.id !== vId && String(v.numeric_id) !== vId);
-  cachedVoters = cachedVoters.filter(v => String(v.village_id) !== vId);
-  res.json({ success: true, message: 'గ్రామం మరియు ఓటర్ల డేటా తొలగించబడింది' });
-});
+app.delete(villageDeletePaths, handleVillageDelete);
+app.post(villageDeletePaths, handleVillageDelete);
 
 // --- Admin Endpoints ---
 const adminStatsPaths = [

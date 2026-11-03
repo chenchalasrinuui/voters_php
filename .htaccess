@@ -4,7 +4,8 @@
     Header always set Access-Control-Allow-Origin "%{CLIENT_ORIGIN}e" env=CLIENT_ORIGIN
     Header always set Access-Control-Allow-Credentials "true" env=CLIENT_ORIGIN
     Header always set Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    Header always set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma, X-User-Id, X-User-Role, X-User-Numeric-Id"
+    Header always set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma, X-User-Id, X-User-Role, X-User-Numeric-Id, *"
+    Header always set Access-Control-Expose-Headers "Content-Length, Content-Type, Authorization, *"
     Header always set Access-Control-Max-Age "86400"
 </IfModule>
 
@@ -12,11 +13,19 @@
     Options -MultiViews
     RewriteEngine On
 
+    # Prevent Apache mod_dir from issuing 301 redirects on directory endpoints without CORS
+    DirectorySlash Off
+
     # Route preflight OPTIONS to cors.php immediately
     RewriteCond %{REQUEST_METHOD} OPTIONS
     RewriteRule ^(.*)$ cors.php [QSA,L]
 
-    # Explicit routing for API endpoints (making trailing slashes optional to prevent POST drops)
+    # Explicit routing for API endpoints (making trailing slashes optional to prevent drops)
+    RewriteRule ^api/villages/delete/?$ api/villages/delete.php [QSA,L]
+    RewriteRule ^api/villages/delete/(\d+)/?$ routes/villages.php?action=delete&delete_id=$1 [QSA,L]
+    RewriteRule ^api/villages/(\d+)/?$ routes/villages.php?delete_id=$1 [QSA,L]
+    RewriteRule ^api/villages/?$ routes/villages.php [QSA,L]
+
     RewriteRule ^api/upload/?$ routes/upload.php [QSA,L]
     RewriteRule ^api/auth/login/?$ routes/auth.php [QSA,L]
     RewriteRule ^api/auth/?$ routes/auth.php [QSA,L]
@@ -25,20 +34,12 @@
     RewriteRule ^api/voters/reset-votes/?$ routes/voters.php?action=reset-votes [QSA,L]
     RewriteRule ^api/voters/edit/?$ routes/voters.php?action=edit [QSA,L]
     RewriteRule ^api/voters/?$ routes/voters.php [QSA,L]
-    RewriteRule ^api/villages/delete/?$ api/villages/delete/index.php [QSA,L]
-    RewriteRule ^api/villages/?$ routes/villages.php [QSA,L]
     RewriteRule ^api/admin/users/?$ routes/admin.php?action=users [QSA,L]
     RewriteRule ^api/admin/stats/?$ routes/admin.php?action=stats [QSA,L]
     RewriteRule ^api/health/?$ routes/health.php [QSA,L]
-    RewriteRule ^api/voters/vote/?$ routes/voters.php?action=vote [QSA,L]
-    RewriteRule ^api/voters/flag/?$ routes/voters.php?action=flag [QSA,L]
-    RewriteRule ^api/voters/reset-votes/?$ routes/voters.php?action=reset-votes [QSA,L]
-    RewriteRule ^api/voters/edit/?$ routes/voters.php?action=edit [QSA,L]
-    RewriteRule ^api/voters/?$ routes/voters.php [QSA,L]
 
-    # Serve existing physical files and directories directly
-    RewriteCond %{REQUEST_FILENAME} -f [OR]
-    RewriteCond %{REQUEST_FILENAME} -d
+    # Serve existing physical files directly (photos, pdfs, scripts, html)
+    RewriteCond %{REQUEST_FILENAME} -f
     RewriteRule ^ - [L]
 
     # Send all other API requests through router.php
