@@ -1,0 +1,8 @@
+{
+  "name": "Voters API Backend",
+  "description": "Backend API for Voters Management System with full CORS support for XAMPP and local/remote frontend applications.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
