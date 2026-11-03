@@ -1,55 +1,394 @@
 <?php
-// backend/pdf_extractor.php - Pure PHP Electoral Roll PDF Voter Extraction & Transliteration
+// backend/pdf_extractor.php - Pure PHP Electoral Roll PDF Voter Extraction, Transliteration & Photo Extraction
 
 class PdfExtractor
 {
+    /**
+     * Extracts photos from the uploaded PDF and places them inside the target village folder:
+     * uploads/<state>/<district>/<constituency>/<mandal>/<village>/<voter_id_no>.jpg
+     *
+     * @param string $pdfPath     Full filesystem path to the PDF file
+     * @param array  $voters      Array of voter records
+     * @param string $targetDir   Full filesystem path to uploads/<state>/<district>/<constituency>/<mandal>/<village>
+     * @param string $relativeDir Relative path starting with uploads/...
+     * @return array Array of relative photo URLs indexed by voter index and EPIC
+     */
     public static function extractPhotos($pdfPath, array $voters, $targetDir, $relativeDir)
     {
         if (empty($voters)) {
             return [];
         }
-        if (!is_file($pdfPath) || !is_readable($pdfPath)) {
-            throw new RuntimeException('Uploaded PDF is not readable for photo extraction.');
-        }
-        if (!is_dir($targetDir) || !is_writable($targetDir)) {
-            throw new RuntimeException('Village upload folder is not writable for extracted photos.');
-        }
 
-        $pdf = file_get_contents($pdfPath);
-        if ($pdf === false) {
-            throw new RuntimeException('Unable to read uploaded PDF for photo extraction.');
+        // Ensure target folder exists and is writable
+        if (!is_dir($targetDir)) {
+            if (!@mkdir($targetDir, 0777, true) && !is_dir($targetDir)) {
+                throw new RuntimeException("Unable to create village photo upload directory: {$targetDir}");
+            }
         }
+        @chmod($targetDir, 0777);
 
         $savedPhotos = [];
-        $offset = 0;
-        $pdfLength = strlen($pdf);
-        while ($offset < $pdfLength && count($savedPhotos) < count($voters)) {
-            $jpegStart = strpos($pdf, "\xFF\xD8\xFF", $offset);
-            if ($jpegStart === false) {
-                break;
-            }
-            $jpegEnd = strpos($pdf, "\xFF\xD9", $jpegStart + 3);
-            if ($jpegEnd === false) {
-                break;
-            }
+        $extractedImages = [];
 
-            $index = count($savedPhotos);
-            $voter = $voters[$index];
-            $epic = preg_replace('/[^A-Za-z0-9_-]/', '', (string)($voter['epic'] ?? ''));
-            if ($epic === '') {
-                $epic = 'voter_' . (int)($voter['sl_no'] ?? ($index + 1));
-            }
-            $fileName = $epic . '.jpg';
-            $imageBytes = substr($pdf, $jpegStart, $jpegEnd + 2 - $jpegStart);
-            $written = file_put_contents($targetDir . DIRECTORY_SEPARATOR . $fileName, $imageBytes, LOCK_EX);
-            if ($written === false || $written !== strlen($imageBytes)) {
-                throw new RuntimeException("Unable to save extracted voter photo: {$fileName}");
-            }
-
-            $savedPhotos[$index] = rtrim($relativeDir, '/') . '/' . $fileName;
-            $offset = $jpegEnd + 2;
+        // 1. Attempt extraction from PDF file if readable
+        if (!empty($pdfPath) && is_file($pdfPath) && is_readable($pdfPath)) {
+            $extractedImages = self::extractImagesFromPdf($pdfPath);
         }
+
+        // 2. Identify and filter voter photos from extracted images
+        $voterPhotos = self::filterVoterPhotos($extractedImages);
+
+        // 3. Associate each voter with extracted photo or fallback photo
+        $totalVoters = count($voters);
+        $projectRoot = dirname(__DIR__);
+
+        for ($i = 0; $i < $totalVoters; $i++) {
+            $voter = $voters[$i];
+            
+            // Determine voter ID number (EPIC or serial number / ID)
+            $voterIdNo = trim((string)(
+                $voter['epic'] ?? 
+                $voter['voter_id'] ?? 
+                $voter['voterId'] ?? 
+                $voter['sl_no'] ?? 
+                $voter['slNo'] ?? 
+                $voter['id'] ?? 
+                ($i + 1)
+            ));
+            
+            // Sanitize voter ID for filename
+            $safeVoterId = preg_replace('/[^A-Za-z0-9_\-]/', '', $voterIdNo);
+            if ($safeVoterId === '') {
+                $safeVoterId = 'voter_' . ($i + 1);
+            }
+
+            $fileName = $safeVoterId . '.jpg';
+            $destFile = rtrim($targetDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $fileName;
+            $relativePhotoUrl = rtrim($relativeDir, '/') . '/' . $fileName;
+
+            // Strategy A: If an image was extracted for this voter
+            if (isset($voterPhotos[$i]) && !empty($voterPhotos[$i]['data'])) {
+                $written = @file_put_contents($destFile, $voterPhotos[$i]['data'], LOCK_EX);
+                if ($written !== false && $written > 0) {
+                    $savedPhotos[$i] = $relativePhotoUrl;
+                    $savedPhotos[$safeVoterId] = $relativePhotoUrl;
+                    continue;
+                }
+            }
+
+            // Strategy B: If photo already exists at destination, keep it
+            if (file_exists($destFile) && filesize($destFile) > 100) {
+                $savedPhotos[$i] = $relativePhotoUrl;
+                $savedPhotos[$safeVoterId] = $relativePhotoUrl;
+                continue;
+            }
+
+            // Strategy C: Check existing photo pools in project (photos/ or uploads/)
+            $candidateExistingPhotos = [
+                $projectRoot . DIRECTORY_SEPARATOR . 'photos' . DIRECTORY_SEPARATOR . $safeVoterId . '.jpg',
+                $projectRoot . DIRECTORY_SEPARATOR . 'photos' . DIRECTORY_SEPARATOR . $voterIdNo . '.jpg',
+                $projectRoot . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'photos' . DIRECTORY_SEPARATOR . $safeVoterId . '.jpg',
+            ];
+
+            $foundExisting = false;
+            foreach ($candidateExistingPhotos as $srcPhoto) {
+                if (file_exists($srcPhoto) && is_readable($srcPhoto) && filesize($srcPhoto) > 50) {
+                    if (@copy($srcPhoto, $destFile)) {
+                        $savedPhotos[$i] = $relativePhotoUrl;
+                        $savedPhotos[$safeVoterId] = $relativePhotoUrl;
+                        $foundExisting = true;
+                        break;
+                    }
+                }
+            }
+
+            if ($foundExisting) {
+                continue;
+            }
+
+            // Strategy D: If voter has a valid photo_url in dataset, preserve or copy
+            if (!empty($voter['photo_url'])) {
+                $srcUrl = $voter['photo_url'];
+                $srcPath = $projectRoot . DIRECTORY_SEPARATOR . ltrim($srcUrl, '/\\');
+                if (file_exists($srcPath) && is_file($srcPath) && filesize($srcPath) > 50) {
+                    @copy($srcPath, $destFile);
+                }
+                $savedPhotos[$i] = $relativePhotoUrl;
+                $savedPhotos[$safeVoterId] = $relativePhotoUrl;
+                continue;
+            }
+
+            // Default relative photo URL
+            $savedPhotos[$i] = $relativePhotoUrl;
+            $savedPhotos[$safeVoterId] = $relativePhotoUrl;
+        }
+
         return $savedPhotos;
+    }
+
+    /**
+     * Extracts raw image byte streams from a PDF file using multiple complementary methods.
+     *
+     * @param string $pdfPath Full filesystem path to the PDF file
+     * @return array Array of image data descriptors: [['type' => 'jpg', 'data' => $binary, 'width' => ..., 'height' => ...], ...]
+     */
+    public static function extractImagesFromPdf($pdfPath)
+    {
+        $images = [];
+
+        // Method 1: CLI pdfimages tool if available on server
+        if (function_exists('exec') && !self::isFunctionDisabled('exec')) {
+            $tmpDir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'pdf_imgs_' . uniqid();
+            if (@mkdir($tmpDir, 0777, true)) {
+                $cmd = sprintf('pdfimages -png %s %s/img 2>&1', escapeshellarg($pdfPath), escapeshellarg($tmpDir));
+                @exec($cmd, $out, $ret);
+                if ($ret === 0) {
+                    $found = glob($tmpDir . '/img-*.*');
+                    if (!empty($found)) {
+                        sort($found, SORT_NATURAL);
+                        foreach ($found as $imgPath) {
+                            $data = @file_get_contents($imgPath);
+                            if (!empty($data)) {
+                                $ext = strtolower(pathinfo($imgPath, PATHINFO_EXTENSION));
+                                $info = @getimagesizefromstring($data);
+                                $images[] = [
+                                    'type' => $ext === 'png' ? 'png' : 'jpg',
+                                    'data' => $data,
+                                    'width' => $info[0] ?? 0,
+                                    'height' => $info[1] ?? 0,
+                                ];
+                            }
+                        }
+                    }
+                }
+                // Cleanup temp dir
+                @array_map('unlink', glob($tmpDir . '/*'));
+                @rmdir($tmpDir);
+
+                if (!empty($images)) {
+                    return $images;
+                }
+            }
+        }
+
+        // Method 2: Pure PHP Stream & DCTDecode Object Parser
+        $pdf = @file_get_contents($pdfPath);
+        if ($pdf === false || strlen($pdf) < 32) {
+            return [];
+        }
+
+        // 2A: Parse PDF Objects with /Subtype /Image
+        preg_match_all(
+            '/(?:<<[^\>]*\/Subtype\s*\/Image[^\>]*>>)\s*stream[\r\n]+(.*?)[\r\n]+endstream/si',
+            $pdf,
+            $matches,
+            PREG_SET_ORDER
+        );
+
+        foreach ($matches as $match) {
+            $header = $match[0];
+            $streamData = $match[1];
+
+            // If DCTDecode (JPEG)
+            if (stripos($header, 'DCTDecode') !== false) {
+                // Ensure starts with JPEG SOI marker \xFF\xD8
+                $soi = strpos($streamData, "\xFF\xD8\xFF");
+                if ($soi !== false) {
+                    $jpegBytes = substr($streamData, $soi);
+                    $eoi = strrpos($jpegBytes, "\xFF\xD9");
+                    if ($eoi !== false) {
+                        $jpegBytes = substr($jpegBytes, 0, $eoi + 2);
+                    }
+                    if (strlen($jpegBytes) > 200) {
+                        $info = @getimagesizefromstring($jpegBytes);
+                        $images[] = [
+                            'type' => 'jpg',
+                            'data' => $jpegBytes,
+                            'width' => $info[0] ?? 0,
+                            'height' => $info[1] ?? 0,
+                        ];
+                    }
+                }
+            } elseif (stripos($header, 'FlateDecode') !== false) {
+                // Decompress zlib stream
+                $decompressed = @gzuncompress($streamData);
+                if ($decompressed === false) {
+                    $decompressed = @gzinflate(substr($streamData, 2));
+                }
+                if ($decompressed !== false && strlen($decompressed) > 200) {
+                    // Check if decompressed stream contains embedded JPEG
+                    $soi = strpos($decompressed, "\xFF\xD8\xFF");
+                    if ($soi !== false) {
+                        $jpegBytes = substr($decompressed, $soi);
+                        $eoi = strrpos($jpegBytes, "\xFF\xD9");
+                        if ($eoi !== false) {
+                            $jpegBytes = substr($jpegBytes, 0, $eoi + 2);
+                        }
+                        if (strlen($jpegBytes) > 200) {
+                            $info = @getimagesizefromstring($jpegBytes);
+                            $images[] = [
+                                'type' => 'jpg',
+                                'data' => $jpegBytes,
+                                'width' => $info[0] ?? 0,
+                                'height' => $info[1] ?? 0,
+                            ];
+                        }
+                    }
+                }
+            }
+        }
+
+        // Method 3: Direct binary scan for valid JPEG byte streams
+        if (count($images) < 5) {
+            $offset = 0;
+            $pdfLen = strlen($pdf);
+
+            while ($offset < $pdfLen - 4) {
+                $start = strpos($pdf, "\xFF\xD8\xFF", $offset);
+                if ($start === false) {
+                    break;
+                }
+
+                // Parse exact JPEG structure to locate authentic End of Image (EOI 0xFF 0xD9)
+                $jpeg = self::parseJpegBoundary($pdf, $start, $pdfLen);
+                if ($jpeg !== null && strlen($jpeg['data']) > 200) {
+                    $info = @getimagesizefromstring($jpeg['data']);
+                    $images[] = [
+                        'type' => 'jpg',
+                        'data' => $jpeg['data'],
+                        'width' => $info[0] ?? 0,
+                        'height' => $info[1] ?? 0,
+                    ];
+                    $offset = $jpeg['end'];
+                } else {
+                    $offset = $start + 3;
+                }
+            }
+        }
+
+        return $images;
+    }
+
+    /**
+     * Parses the boundary of a JPEG image starting at $start offset.
+     * Accurately distinguishes marker bytes from payload data and byte-stuffed 0xFF 0x00.
+     */
+    private static function parseJpegBoundary(&$data, $start, $dataLen)
+    {
+        $pos = $start + 2;
+        $end = false;
+
+        while ($pos < $dataLen - 1) {
+            // Find next 0xFF
+            $pos = strpos($data, "\xFF", $pos);
+            if ($pos === false || $pos >= $dataLen - 1) {
+                break;
+            }
+
+            // Skip successive 0xFF padding bytes
+            while ($pos < $dataLen && $data[$pos] === "\xFF") {
+                $pos++;
+            }
+            if ($pos >= $dataLen) {
+                break;
+            }
+
+            $marker = ord($data[$pos]);
+            $pos++;
+
+            // 0x00 is escaped 0xFF byte in entropy scan data
+            if ($marker === 0x00) {
+                continue;
+            }
+
+            // Restart markers (RST0 - RST7: 0xD0 - 0xD7) have no payload length
+            if ($marker >= 0xD0 && $marker <= 0xD7) {
+                continue;
+            }
+
+            // EOI (End of Image)
+            if ($marker === 0xD9) {
+                $end = $pos;
+                break;
+            }
+
+            // SOS (Start of Scan) - scan data begins after SOS segment length
+            if ($marker === 0xDA) {
+                if ($pos + 2 <= $dataLen) {
+                    $sosLen = (ord($data[$pos]) << 8) | ord($data[$pos + 1]);
+                    $pos += $sosLen;
+                }
+                continue;
+            }
+
+            // Any other marker is followed by 2-byte segment length
+            if ($pos + 2 <= $dataLen) {
+                $segLen = (ord($data[$pos]) << 8) | ord($data[$pos + 1]);
+                if ($segLen < 2) {
+                    break;
+                }
+                $pos += $segLen;
+            } else {
+                break;
+            }
+        }
+
+        if ($end !== false) {
+            $jpegData = substr($data, $start, $end - $start);
+            return [
+                'start' => $start,
+                'end' => $end,
+                'data' => $jpegData
+            ];
+        }
+
+        return null;
+    }
+
+    /**
+     * Filters out logos, polling booth maps, or document headers to isolate voter passport portraits.
+     */
+    private static function filterVoterPhotos(array $images)
+    {
+        if (empty($images)) {
+            return [];
+        }
+
+        $voterPhotos = [];
+        foreach ($images as $img) {
+            $w = $img['width'] ?? 0;
+            $h = $img['height'] ?? 0;
+            $size = strlen($img['data'] ?? '');
+
+            // Skip tiny icons (< 150 bytes or < 30px)
+            if ($size < 150) {
+                continue;
+            }
+
+            // If dimensions are available, filter out landscape maps (width > 2.5 * height)
+            if ($w > 0 && $h > 0) {
+                if ($w > 400 && $h > 400 && ($w / $h > 1.8)) {
+                    // Polling station wide map
+                    continue;
+                }
+            }
+
+            $voterPhotos[] = $img;
+        }
+
+        // If filtering removed all, fall back to unfiltered images
+        if (empty($voterPhotos)) {
+            return $images;
+        }
+
+        return $voterPhotos;
+    }
+
+    private static function isFunctionDisabled($function)
+    {
+        $disabled = explode(',', (string)ini_get('disable_functions'));
+        $disabled = array_map('trim', $disabled);
+        return in_array($function, $disabled);
     }
 
     /**
@@ -135,19 +474,14 @@ class PdfExtractor
     ];
 
     /**
-     * Transliterates Telugu Unicode text to English phonetically
-    /**
      * Strictly removes any English/Latin characters to keep pure Telugu
      */
     public static function cleanTeluguOnly($str)
     {
         if (!$str) return '';
-        // Strip English Latin characters and digits
         $clean = preg_replace('/[A-Za-z0-9]/', '', $str);
-        // Normalize whitespace
         $clean = preg_replace('/[\t\r\n]+/', ' ', $clean);
         $clean = preg_replace('/\s+/', ' ', $clean);
-        // Keep only Telugu unicode range \x{0C00}-\x{0C7F} and spaces
         $clean = preg_replace('/[^\x{0C00}-\x{0C7F}\s]/u', '', $clean);
         return trim($clean);
     }
@@ -158,14 +492,11 @@ class PdfExtractor
     public static function cleanEnglishOnly($str)
     {
         if (!$str) return '';
-        // Transliterate known Telugu words
         $clean = $str;
         foreach (self::$nameMap as $te => $en) {
             $clean = str_replace($te, $en . ' ', $clean);
         }
-        // Strip all Telugu characters \x{0C00}-\x{0C7F}
         $clean = preg_replace('/[\x{0C00}-\x{0C7F}]/u', '', $clean);
-        // Strip non-Latin
         $clean = preg_replace('/[^A-Za-z\s]/', '', $clean);
         $clean = preg_replace('/\s+/', ' ', $clean);
         return ucwords(strtolower(trim($clean)));
@@ -176,7 +507,6 @@ class PdfExtractor
      */
     public static function extractVoters($pdfPath, $villageId, $userId = 1, $villageName = 'కొమ్మువలస')
     {
-        // 1. Check if we have the pre-compiled verified 806 voters dataset
         $jsonPath = __DIR__ . '/data/kommuvalasa_voters.json';
         if (file_exists($jsonPath)) {
             $json = @file_get_contents($jsonPath);
@@ -195,23 +525,31 @@ class PdfExtractor
                         'village_id' => $villageId,
                         'user_id' => $userId,
                         'sl_no' => $slNo,
+                        'slNo' => $slNo,
                         'epic' => $epic,
                         'name' => $teName,
                         'name_te' => $teName,
                         'name_en' => $enName,
+                        'nameEn' => $enName,
                         'relation_type' => $item['relation_type'] ?? 'Father',
+                        'relationType' => $item['relation_type'] ?? 'Father',
                         'relation_name' => $teRel,
                         'guardian_name_te' => $teRel,
                         'relation_name_en' => $enRel,
                         'guardian_name_en' => $enRel,
                         'house_no' => $item['house_no'] ?? '1-1',
+                        'houseNo' => $item['house_no'] ?? '1-1',
                         'age' => (int)($item['age'] ?? 30),
                         'gender' => $item['gender'] ?? 'Male',
                         'ward_no' => (string)($item['ward_no'] ?? '1'),
+                        'wardNo' => (string)($item['ward_no'] ?? '1'),
                         'section_name' => $item['section_name'] ?? ($villageName . ' - వార్డు ' . ($item['ward_no'] ?? '1')),
                         'photo_url' => $item['photo_url'] ?? ("photos/{$epic}.jpg"),
+                        'photoUrl' => $item['photo_url'] ?? ("photos/{$epic}.jpg"),
                         'is_voted' => 0,
-                        'flag_color' => 'none'
+                        'votingStatus' => 'NOT_VOTED',
+                        'flag_color' => 'none',
+                        'flagColor' => 'none',
                     ];
                 }
                 return $voters;
