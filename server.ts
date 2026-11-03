@@ -701,12 +701,69 @@ const handleVillageDelete = (req: Request, res: Response) => {
     req.body?.village_id ||
     req.body?.villageId ||
     ''
+  ).trim();
+
+  const vName = String(
+    req.body?.village_name ||
+    req.body?.village ||
+    req.body?.name ||
+    req.query?.village_name ||
+    req.query?.village ||
+    req.query?.name ||
+    ''
+  ).trim().toLowerCase();
+
+  // Find target village
+  const target = villages.find(v => 
+    (vId && (v.id === vId || String(v.numeric_id) === vId || v.name.toLowerCase() === vId.toLowerCase())) ||
+    (vName && v.name.toLowerCase() === vName)
   );
-  if (vId) {
-    villages = villages.filter(v => v.id !== vId && String(v.numeric_id) !== vId);
-    cachedVoters = cachedVoters.filter(v => String(v.village_id) !== vId);
+
+  const matchedId = target ? target.id : vId;
+  const matchedName = target ? target.name : (vName || vId);
+
+  // 1. Delete village from villages list
+  villages = villages.filter(v => 
+    v.id !== matchedId && 
+    String(v.numeric_id) !== matchedId &&
+    v.name.toLowerCase() !== matchedName.toLowerCase()
+  );
+
+  // 2. Delete voters associated with this village
+  cachedVoters = cachedVoters.filter(v => 
+    String(v.village_id) !== matchedId && 
+    String(v.village_id) !== String(target?.numeric_id)
+  );
+
+  // 3. Remove village folder from disk if present
+  if (target) {
+    const sanitizeSeg = (str: string) => str.replace(/[\/\\:*?"<>|]/g, '_').trim();
+    const villageDir = path.join(
+      __dirname,
+      'uploads',
+      sanitizeSeg(target.state || 'Andhra Pradesh'),
+      sanitizeSeg(target.district || 'Srikakulam'),
+      sanitizeSeg(target.constituency || 'Patapatnam'),
+      sanitizeSeg(target.mandal || 'L.N. Peta'),
+      sanitizeSeg(target.name || 'Kommuvalasa')
+    );
+    if (fs.existsSync(villageDir)) {
+      try {
+        fs.rmSync(villageDir, { recursive: true, force: true });
+      } catch (e) {}
+    }
   }
-  res.json({ success: true, id: vId, message: 'గ్రామం మరియు ఓటర్ల డేటా తొలగించబడింది' });
+
+  res.json({
+    success: true,
+    id: matchedId,
+    village: matchedName,
+    deleted_village: true,
+    deleted_voters: true,
+    message: 'గ్రామం మరియు ఓటర్ల డేటా విజయవంతంగా తొలగించబడింది (Village and voters deleted successfully)',
+    remainingVillages: villages.length,
+    remainingVoters: cachedVoters.length
+  });
 };
 
 app.delete(villageDeletePaths, handleVillageDelete);

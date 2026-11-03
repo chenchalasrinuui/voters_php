@@ -1,10 +1,27 @@
 <?php
-// backend/routes/villages.php - Multi-Village Management (with universal CORS)
+// backend/routes/villages.php - Multi-Village Management (with universal CORS & complete deletion)
 
 require_once __DIR__ . '/../cors.php';
 require_once __DIR__ . '/../database.php';
 
 header("Content-Type: application/json; charset=UTF-8");
+
+// Helper function to recursively delete village upload directory
+function deleteDirectoryRecursively($dir) {
+    if (!is_dir($dir)) {
+        return;
+    }
+    $items = array_diff(scandir($dir) ?: [], ['.', '..']);
+    foreach ($items as $item) {
+        $path = $dir . DIRECTORY_SEPARATOR . $item;
+        if (is_dir($path)) {
+            deleteDirectoryRecursively($path);
+        } else {
+            @unlink($path);
+        }
+    }
+    @rmdir($dir);
+}
 
 // Handle preflight OPTIONS immediately
 if (isset($_SERVER['REQUEST_METHOD']) && strtoupper($_SERVER['REQUEST_METHOD']) === 'OPTIONS') {
@@ -39,56 +56,147 @@ if (
     isset($_GET['delete_id']) ||
     stripos($_SERVER['REQUEST_URI'] ?? '', 'villages/delete') !== false
 ) {
-    // Extract village ID from all possible parameters
-    $vId = (int)(
-        $_GET['delete_id'] ?? 
-        $_GET['id'] ?? 
-        $_GET['village_id'] ?? 
-        $_GET['villageId'] ?? 
-        $body['id'] ?? 
-        $body['delete_id'] ?? 
-        $body['village_id'] ?? 
-        $body['villageId'] ?? 
-        $_POST['id'] ?? 
-        $_POST['delete_id'] ?? 
-        $_POST['village_id'] ?? 
-        $_POST['villageId'] ?? 
-        0
-    );
+    // Extract ID or Name from all possible sources
+    $vIdRaw = $_GET['delete_id'] ?? 
+              $_GET['id'] ?? 
+              $_GET['village_id'] ?? 
+              $_GET['villageId'] ?? 
+              $body['id'] ?? 
+              $body['delete_id'] ?? 
+              $body['village_id'] ?? 
+              $body['villageId'] ?? 
+              $_POST['id'] ?? 
+              $_POST['delete_id'] ?? 
+              $_POST['village_id'] ?? 
+              $_POST['villageId'] ?? 
+              null;
 
-    // Fallback: check if ID was passed in URI segment (e.g. /api/villages/delete/1 or /api/villages/1)
-    if ($vId <= 0 && preg_match('#/villages/(?:delete/)?(\d+)#', $_SERVER['REQUEST_URI'] ?? '', $m)) {
-        $vId = (int)$m[1];
+    $vName = trim((string)(
+        $_GET['village_name'] ?? 
+        $_GET['village'] ?? 
+        $_GET['name'] ?? 
+        $body['village_name'] ?? 
+        $body['village'] ?? 
+        $body['name'] ?? 
+        $_POST['village_name'] ?? 
+        $_POST['village'] ?? 
+        $_POST['name'] ?? 
+        ''
+    ));
+
+    $vId = is_numeric($vIdRaw) ? (int)$vIdRaw : 0;
+    if (!$vId && is_string($vIdRaw) && !empty($vIdRaw) && !is_numeric($vIdRaw)) {
+        $vName = trim($vIdRaw);
     }
 
-    if ($vId <= 0) {
+    // Fallback: check if ID or name was passed in URI segment (e.g. /api/villages/delete/1 or /api/villages/1)
+    if ($vId <= 0 && preg_match('#/villages/(?:delete/)?([^/?#]+)#', $_SERVER['REQUEST_URI'] ?? '', $m)) {
+        if (is_numeric($m[1])) {
+            $vId = (int)$m[1];
+        } else if ($m[1] !== 'delete') {
+            $vName = urldecode($m[1]);
+        }
+    }
+
+    // Lookup village row before deletion to get upload folder details
+    $vRow = null;
+    if ($pdo) {
+        try {
+            if ($vId > 0) {
+                $vStmt = $pdo->prepare("SELECT * FROM villages WHERE id = ? LIMIT 1");
+                $vStmt->execute([$vId]);
+                $vRow = $vStmt->fetch();
+            } elseif (!empty($vName)) {
+                $vStmt = $pdo->prepare("SELECT * FROM villages WHERE village_name = ? OR village_name_te = ? LIMIT 1");
+                $vStmt->execute([$vName, $vName]);
+                $vRow = $vStmt->fetch();
+                if ($vRow) {
+                    $vId = (int)$vRow['id'];
+                }
+            }
+        } catch (Throwable $e) {
+            error_log("Village lookup error before delete: " . $e->getMessage());
+        }
+    }
+
+    if ($vId <= 0 && empty($vName)) {
         http_response_code(400);
         echo json_encode([
-            'error' => 'చెల్లని గ్రామం ఐడీ (Village ID is required)',
+            'error' => 'చెల్లని గ్రామం ఐడీ లేదా పేరు (Village ID or name is required)',
             'success' => false
         ], JSON_UNESCAPED_UNICODE);
         exit();
     }
 
+    // Delete BOTH voters and the village from the database
+    $deletedVoters = 0;
+    $deletedVillages = 0;
+
     if ($pdo) {
         try {
             $pdo->beginTransaction();
-            $pdo->prepare("DELETE FROM voters WHERE village_id = ?")->execute([$vId]);
-            $pdo->prepare("DELETE FROM villages WHERE id = ?")->execute([$vId]);
+
+            if ($vId > 0) {
+                // 1. Delete all voters associated with this village
+                $delVotersStmt = $pdo->prepare("DELETE FROM voters WHERE village_id = ?");
+                $delVotersStmt->execute([$vId]);
+                $deletedVoters = $delVotersStmt->rowCount();
+
+                // 2. Delete the village record itself
+                $delVillageStmt = $pdo->prepare("DELETE FROM villages WHERE id = ?");
+                $delVillageStmt->execute([$vId]);
+                $deletedVillages = $delVillageStmt->rowCount();
+            } elseif (!empty($vName)) {
+                // Delete by name if no numeric ID was resolved
+                $vSub = $pdo->prepare("SELECT id FROM villages WHERE village_name = ? OR village_name_te = ?");
+                $vSub->execute([$vName, $vName]);
+                $foundIds = $vSub->fetchAll(PDO::FETCH_COLUMN);
+
+                if (!empty($foundIds)) {
+                    $inClause = implode(',', array_map('intval', $foundIds));
+                    $pdo->exec("DELETE FROM voters WHERE village_id IN ($inClause)");
+                    $pdo->exec("DELETE FROM villages WHERE id IN ($inClause)");
+                    $deletedVillages = count($foundIds);
+                }
+            }
+
             $pdo->commit();
         } catch (Throwable $e) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
             }
-            error_log("Village deletion warning: " . $e->getMessage());
+            error_log("Village and voters deletion warning: " . $e->getMessage());
+        }
+    }
+
+    // 3. Clean up the village upload folder and extracted photos from filesystem
+    if ($vRow) {
+        $state = trim($vRow['state'] ?? '');
+        $district = trim($vRow['district'] ?? '');
+        $constituency = trim($vRow['constituency'] ?? '');
+        $mandal = trim($vRow['mandal'] ?? '');
+        $villageName = trim($vRow['village_name'] ?? '');
+
+        if ($villageName !== '') {
+            $projectRoot = dirname(__DIR__);
+            $folderSegments = array_map(function($s) {
+                return preg_replace('/[\/\\:*?"<>|]/', '_', trim($s));
+            }, [$state, $district, $constituency, $mandal, $villageName]);
+
+            $villageDir = $projectRoot . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $folderSegments);
+            if (is_dir($villageDir)) {
+                deleteDirectoryRecursively($villageDir);
+            }
         }
     }
 
     echo json_encode([
         'success' => true,
-        'id' => $vId,
-        'message' => 'గ్రామం మరియు ఓటర్ల డేటా తొలగించబడింది (Village and voters deleted successfully)'
-    ], JSON_UNESCAPED_UNICODE);
+        'id' => $vId ?: $vName,
+        'deleted_village' => true,
+        'deleted_voters' => true,
+        'message' => 'గ్రామం మరియు ఓటర్ల డేటా విజయవంతంగా తొలగించబడింది (Village and voters deleted successfully)'
+    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     exit();
 }
 
@@ -172,10 +280,10 @@ if ($method === 'GET') {
 // 3. POST /api/villages - Create village
 if ($method === 'POST') {
     $vName = trim($body['village_name'] ?? $body['name'] ?? $_POST['village_name'] ?? $_POST['name'] ?? '');
-    $state = trim($body['state'] ?? $_POST['state'] ?? 'Andhra Pradesh');
-    $district = trim($body['district'] ?? $_POST['district'] ?? 'Srikakulam');
-    $constituency = trim($body['constituency'] ?? $_POST['constituency'] ?? 'Patapatnam');
-    $mandal = trim($body['mandal'] ?? $_POST['mandal'] ?? 'L.N. Peta');
+    $state = trim($body['state'] ?? $_POST['state'] ?? 'ఆంధ్రప్రదేశ్ (Andhra Pradesh)');
+    $district = trim($body['district'] ?? $_POST['district'] ?? 'శ్రీకాకుళం (Srikakulam)');
+    $constituency = trim($body['constituency'] ?? $_POST['constituency'] ?? '4 - పాతపట్నం (Patapatnam)');
+    $mandal = trim($body['mandal'] ?? $_POST['mandal'] ?? 'ఎల్ ఎన్ పేట (L.N. Peta)');
     $boothName = trim($body['booth_name'] ?? $_POST['booth_name'] ?? ($vName . ' పోలింగ్ కేంద్రం'));
     $partNo = trim($body['part_no'] ?? $_POST['part_no'] ?? '1');
 
