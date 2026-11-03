@@ -1,5 +1,5 @@
 <?php
-// backend/routes/villages.php - Multi-Village Management (with universal CORS & complete deletion)
+// backend/routes/villages.php - Multi-Village Management (with universal CORS & two-stage deletion)
 
 require_once __DIR__ . '/../cors.php';
 require_once __DIR__ . '/../database.php';
@@ -84,34 +84,37 @@ if (
         ''
     ));
 
-    $vId = is_numeric($vIdRaw) ? (int)$vIdRaw : 0;
-    if (!$vId && is_string($vIdRaw) && !empty($vIdRaw) && !is_numeric($vIdRaw)) {
+    $targetVillageId = is_numeric($vIdRaw) ? (int)$vIdRaw : 0;
+    if ($targetVillageId <= 0 && is_string($vIdRaw) && !empty($vIdRaw)) {
         $vName = trim($vIdRaw);
     }
 
     // Fallback: check if ID or name was passed in URI segment (e.g. /api/villages/delete/1 or /api/villages/1)
-    if ($vId <= 0 && preg_match('#/villages/(?:delete/)?([^/?#]+)#', $_SERVER['REQUEST_URI'] ?? '', $m)) {
+    if ($targetVillageId <= 0 && preg_match('#/villages/(?:delete/)?([^/?#]+)#', $_SERVER['REQUEST_URI'] ?? '', $m)) {
         if (is_numeric($m[1])) {
-            $vId = (int)$m[1];
+            $targetVillageId = (int)$m[1];
         } else if ($m[1] !== 'delete') {
             $vName = urldecode($m[1]);
         }
     }
 
-    // Lookup village row before deletion to get upload folder details
+    // Lookup village row before deletion
     $vRow = null;
     if ($pdo) {
         try {
-            if ($vId > 0) {
+            if ($targetVillageId > 0) {
                 $vStmt = $pdo->prepare("SELECT * FROM villages WHERE id = ? LIMIT 1");
-                $vStmt->execute([$vId]);
+                $vStmt->execute([$targetVillageId]);
                 $vRow = $vStmt->fetch();
+                if ($vRow && empty($vName)) {
+                    $vName = $vRow['village_name'];
+                }
             } elseif (!empty($vName)) {
                 $vStmt = $pdo->prepare("SELECT * FROM villages WHERE village_name = ? OR village_name_te = ? LIMIT 1");
                 $vStmt->execute([$vName, $vName]);
                 $vRow = $vStmt->fetch();
                 if ($vRow) {
-                    $vId = (int)$vRow['id'];
+                    $targetVillageId = (int)$vRow['id'];
                 }
             }
         } catch (Throwable $e) {
@@ -119,7 +122,7 @@ if (
         }
     }
 
-    if ($vId <= 0 && empty($vName)) {
+    if ($targetVillageId <= 0 && empty($vName)) {
         http_response_code(400);
         echo json_encode([
             'error' => 'చెల్లని గ్రామం ఐడీ లేదా పేరు (Village ID or name is required)',
@@ -128,7 +131,9 @@ if (
         exit();
     }
 
-    // Delete BOTH voters and the village from the database
+    // Two-stage deletion:
+    // 1. FIRST delete the voters under this village from voters table
+    // 2. THEN delete the village from villages table
     $deletedVoters = 0;
     $deletedVillages = 0;
 
@@ -136,27 +141,28 @@ if (
         try {
             $pdo->beginTransaction();
 
-            if ($vId > 0) {
-                // 1. Delete all voters associated with this village
+            if ($targetVillageId > 0) {
+                // Step 1: FIRST delete voters under this village from voters table
                 $delVotersStmt = $pdo->prepare("DELETE FROM voters WHERE village_id = ?");
-                $delVotersStmt->execute([$vId]);
+                $delVotersStmt->execute([$targetVillageId]);
                 $deletedVoters = $delVotersStmt->rowCount();
 
-                // 2. Delete the village record itself
+                // Step 2: THEN delete the village from villages table
                 $delVillageStmt = $pdo->prepare("DELETE FROM villages WHERE id = ?");
-                $delVillageStmt->execute([$vId]);
+                $delVillageStmt->execute([$targetVillageId]);
                 $deletedVillages = $delVillageStmt->rowCount();
             } elseif (!empty($vName)) {
-                // Delete by name if no numeric ID was resolved
-                $vSub = $pdo->prepare("SELECT id FROM villages WHERE village_name = ? OR village_name_te = ?");
-                $vSub->execute([$vName, $vName]);
-                $foundIds = $vSub->fetchAll(PDO::FETCH_COLUMN);
+                // Find all matching village IDs
+                $findStmt = $pdo->prepare("SELECT id FROM villages WHERE village_name = ? OR village_name_te = ?");
+                $findStmt->execute([$vName, $vName]);
+                $ids = $findStmt->fetchAll(PDO::FETCH_COLUMN);
 
-                if (!empty($foundIds)) {
-                    $inClause = implode(',', array_map('intval', $foundIds));
-                    $pdo->exec("DELETE FROM voters WHERE village_id IN ($inClause)");
-                    $pdo->exec("DELETE FROM villages WHERE id IN ($inClause)");
-                    $deletedVillages = count($foundIds);
+                if (!empty($ids)) {
+                    $inList = implode(',', array_map('intval', $ids));
+                    // Step 1: FIRST delete voters under this village
+                    $deletedVoters = $pdo->exec("DELETE FROM voters WHERE village_id IN ($inList)");
+                    // Step 2: THEN delete the village
+                    $deletedVillages = $pdo->exec("DELETE FROM villages WHERE id IN ($inList)");
                 }
             }
 
@@ -169,7 +175,7 @@ if (
         }
     }
 
-    // 3. Clean up the village upload folder and extracted photos from filesystem
+    // Clean up village folder and extracted photos from filesystem
     if ($vRow) {
         $state = trim($vRow['state'] ?? '');
         $district = trim($vRow['district'] ?? '');
@@ -192,10 +198,11 @@ if (
 
     echo json_encode([
         'success' => true,
-        'id' => $vId ?: $vName,
-        'deleted_village' => true,
-        'deleted_voters' => true,
-        'message' => 'గ్రామం మరియు ఓటర్ల డేటా విజయవంతంగా తొలగించబడింది (Village and voters deleted successfully)'
+        'village_id' => $targetVillageId ?: $vName,
+        'village_name' => $vName,
+        'deleted_voters' => $deletedVoters,
+        'deleted_village' => $deletedVillages,
+        'message' => 'గ్రామం మరియు ఓటర్ల డేటా విజయవంతంగా తొలగించబడింది (Voters deleted first, then village deleted successfully)'
     ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     exit();
 }
