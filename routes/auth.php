@@ -87,6 +87,32 @@ function checkPassword($input, $stored) {
     return false;
 }
 
+function findLoginAccount(PDO $pdo, string $table, string $identifier, bool &$lookupFailed): ?array {
+    if (!in_array($table, ['users', 'admin'], true)) {
+        throw new InvalidArgumentException('Unsupported login table.');
+    }
+
+    try {
+        $stmt = $pdo->prepare("SELECT * FROM {$table} WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) LIMIT 1");
+        $stmt->execute([$identifier]);
+        $account = $stmt->fetch();
+        if ($account) {
+            return $account;
+        }
+
+        if (ctype_digit($identifier) && (int)$identifier > 0) {
+            $stmt = $pdo->prepare("SELECT * FROM {$table} WHERE id = ? LIMIT 1");
+            $stmt->execute([(int)$identifier]);
+            return $stmt->fetch() ?: null;
+        }
+    } catch (Throwable $e) {
+        error_log(ucfirst($table) . " table lookup error: " . $e->getMessage());
+        $lookupFailed = true;
+    }
+
+    return null;
+}
+
 $db = new DB();
 $pdo = null;
 
@@ -102,64 +128,46 @@ try {
 
 $matchedUser = null;
 $matchedRole = 'user';
+$matchedAccountType = 'user';
+$lookupFailed = false;
 
 // Check order based on requested role
 $checkAdminFirst = (strtolower($requestedRole) === 'admin' || strtolower($username) === 'admin');
 
 if ($checkAdminFirst) {
     // 1. Check in Admin table
-    try {
-        $stmt = $pdo->prepare("SELECT * FROM admin WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) LIMIT 1");
-        $stmt->execute([$username]);
-        $adminRow = $stmt->fetch();
-        if ($adminRow && checkPassword($password, $adminRow['password'])) {
-            $matchedUser = $adminRow;
-            $matchedRole = 'admin';
-        }
-    } catch (Throwable $e) {
-        error_log("Admin table lookup error: " . $e->getMessage());
+    $adminRow = findLoginAccount($pdo, 'admin', $username, $lookupFailed);
+    if ($adminRow && checkPassword($password, $adminRow['password'])) {
+        $matchedUser = $adminRow;
+        $matchedRole = 'admin';
+        $matchedAccountType = 'admin';
     }
 
     // 2. Fallback to Users table
     if (!$matchedUser) {
-        try {
-            $stmt = $pdo->prepare("SELECT * FROM users WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) LIMIT 1");
-            $stmt->execute([$username]);
-            $userRow = $stmt->fetch();
-            if ($userRow && checkPassword($password, $userRow['password'])) {
-                $matchedUser = $userRow;
-                $matchedRole = $userRow['role'] ?? 'user';
-            }
-        } catch (Throwable $e) {
-            error_log("Users table lookup error: " . $e->getMessage());
+        $userRow = findLoginAccount($pdo, 'users', $username, $lookupFailed);
+        if ($userRow && checkPassword($password, $userRow['password'])) {
+            $matchedUser = $userRow;
+            $matchedRole = $userRow['role'] ?? 'user';
+            $matchedAccountType = 'user';
         }
     }
 } else {
     // 1. Check in Users table
-    try {
-        $stmt = $pdo->prepare("SELECT * FROM users WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) LIMIT 1");
-        $stmt->execute([$username]);
-        $userRow = $stmt->fetch();
-        if ($userRow && checkPassword($password, $userRow['password'])) {
-            $matchedUser = $userRow;
-            $matchedRole = $userRow['role'] ?? 'user';
-        }
-    } catch (Throwable $e) {
-        error_log("Users table lookup error: " . $e->getMessage());
+    $userRow = findLoginAccount($pdo, 'users', $username, $lookupFailed);
+    if ($userRow && checkPassword($password, $userRow['password'])) {
+        $matchedUser = $userRow;
+        $matchedRole = $userRow['role'] ?? 'user';
+        $matchedAccountType = 'user';
     }
 
     // 2. Fallback to Admin table
     if (!$matchedUser) {
-        try {
-            $stmt = $pdo->prepare("SELECT * FROM admin WHERE LOWER(TRIM(username)) = LOWER(TRIM(?)) LIMIT 1");
-            $stmt->execute([$username]);
-            $adminRow = $stmt->fetch();
-            if ($adminRow && checkPassword($password, $adminRow['password'])) {
-                $matchedUser = $adminRow;
-                $matchedRole = 'admin';
-            }
-        } catch (Throwable $e) {
-            error_log("Admin table lookup error: " . $e->getMessage());
+        $adminRow = findLoginAccount($pdo, 'admin', $username, $lookupFailed);
+        if ($adminRow && checkPassword($password, $adminRow['password'])) {
+            $matchedUser = $adminRow;
+            $matchedRole = 'admin';
+            $matchedAccountType = 'admin';
         }
     }
 }
@@ -176,6 +184,24 @@ if ($matchedUser) {
 
     $loginIdentifier = $matchedUser['username'] ?? $username;
     $token = bin2hex(random_bytes(24));
+    try {
+        $session = $pdo->prepare("
+            INSERT INTO auth_sessions (token_hash, account_type, account_id, expires_at)
+            VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL 30 DAY))
+        ");
+        $session->execute([
+            hash('sha256', $token),
+            $matchedAccountType,
+            (int)($matchedUser['id'] ?? 0)
+        ]);
+    } catch (Throwable $e) {
+        error_log("Unable to create authentication session: " . $e->getMessage());
+        http_response_code(503);
+        echo json_encode([
+            'error' => 'Authentication session storage is unavailable. Apply the required database migration and try again.'
+        ], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
 
     echo json_encode([
         'success' => true,
@@ -193,8 +219,18 @@ if ($matchedUser) {
             'mandal' => $matchedUser['mandal'] ?? 'L.N. Peta',
             'village' => $matchedUser['village'] ?? 'Kommuvalasa',
             'role' => $matchedRole,
-            'status' => $matchedUser['status'] ?? 'active'
+            'status' => $matchedUser['status'] ?? 'active',
+            'accountType' => $matchedAccountType,
+            'token' => $token
         ]
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
+}
+
+if ($lookupFailed) {
+    http_response_code(500);
+    echo json_encode([
+        'error' => 'Unable to verify login against the account tables. Check the database schema and server logs.'
     ], JSON_UNESCAPED_UNICODE);
     exit();
 }

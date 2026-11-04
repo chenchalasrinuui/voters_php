@@ -9,6 +9,9 @@ echo json_encode([
         'auth_login' => '/api/auth/login',
         'auth' => '/api/auth',
         'voters' => '/api/voters',
+        'voters_out_of_station' => '/api/voters/out-of-station/',
+        'voters_vote' => '/api/voters/vote/',
+        'voters_flag' => '/api/voters/flag/',
         'villages' => '/api/villages',
         'admin_stats' => '/api/admin/stats',
         'health' => '/api/health'

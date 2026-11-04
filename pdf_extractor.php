@@ -1,127 +1,79 @@
 <?php
-// backend/pdf_extractor.php - Pure PHP Electoral Roll PDF Voter Extraction, Transliteration & Guaranteed Photo Extraction
+// backend/pdf_extractor.php - Electoral Roll PDF Voter Extraction and Photo Extraction
 
 class PdfExtractor
 {
     /**
-     * Extracts photos from the uploaded PDF and guarantees every voter has their photo saved
+     * Extracts photos from the uploaded PDF and saves them for each voter
      * inside the target village folder:
-     * uploads/<state>/<district>/<constituency>/<mandal>/<village>/<voter_id_no>.jpg
+     * uploads/<state>/<district>/<constituency>/<mandal>/<village>/<voter_id_no>.<ext>
      *
      * @param string $pdfPath     Full filesystem path to the PDF file
      * @param array  $voters      Array of voter records
      * @param string $targetDir   Full filesystem path to uploads/<state>/<district>/<constituency>/<mandal>/<village>
      * @param string $relativeDir Relative path starting with uploads/...
-     * @return array Array of relative photo URLs indexed by voter index and EPIC
+     * @return array Relative photo URLs indexed by voter index and EPIC
      */
     public static function extractPhotos($pdfPath, array $voters, $targetDir, $relativeDir)
     {
-        // If voters array is empty, load the default verified voter roll
-        if (empty($voters)) {
-            $voters = self::extractVoters($pdfPath, 1, 1, 'Kommuvalasa');
-        }
-
         if (empty($voters)) {
             return [];
         }
 
-        // Ensure target directory exists and is writable
-        if (!is_dir($targetDir)) {
-            if (!@mkdir($targetDir, 0777, true) && !is_dir($targetDir)) {
-                throw new RuntimeException("Unable to create village photo upload directory: {$targetDir}");
-            }
+        if (empty($pdfPath) || !is_file($pdfPath) || !is_readable($pdfPath) || filesize($pdfPath) <= 100) {
+            throw new RuntimeException('The uploaded PDF could not be read for voter photo extraction.');
         }
-        @chmod($targetDir, 0777);
+
+        $totalVoters = count($voters);
+        $imageObjectCount = 0;
+        $extractedImages = self::extractImagesFromPdf($pdfPath, $imageObjectCount);
+        if ($imageObjectCount === $totalVoters && count($extractedImages) === $totalVoters) {
+            $voterPhotos = self::filterVoterPhotos($extractedImages, true);
+        } else {
+            $voterPhotos = self::filterVoterPhotos($extractedImages);
+        }
+
+        if (count($voterPhotos) < $totalVoters) {
+            throw new RuntimeException(sprintf(
+                'The uploaded PDF contains %d extractable voter photos for %d voters. No default photos were saved. Check that the PDF contains embedded voter photos and that Poppler (pdfimages) is installed on the PHP server.',
+                count($voterPhotos),
+                $totalVoters
+            ));
+        }
+
+        if (!is_dir($targetDir) && !@mkdir($targetDir, 0777, true) && !is_dir($targetDir)) {
+            throw new RuntimeException("Unable to create village photo upload directory: {$targetDir}");
+        }
+        if (!is_writable($targetDir)) {
+            throw new RuntimeException("Village photo upload directory is not writable: {$targetDir}");
+        }
 
         $savedPhotos = [];
-        $extractedImages = [];
-
-        // 1. Extract embedded image streams from PDF file if readable
-        if (!empty($pdfPath) && is_file($pdfPath) && is_readable($pdfPath) && filesize($pdfPath) > 100) {
-            $extractedImages = self::extractImagesFromPdf($pdfPath);
-        }
-
-        // 2. Filter out wide maps/emblems to isolate portrait voter photos
-        $voterPhotos = self::filterVoterPhotos($extractedImages);
-
-        // 3. Save a photo file for EVERY voter in the folder
-        $totalVoters = count($voters);
-        $projectRoot = dirname(__DIR__);
-
         for ($i = 0; $i < $totalVoters; $i++) {
             $voter = $voters[$i];
 
-            // Determine voter ID number (EPIC or serial number / ID)
             $voterIdNo = trim((string)(
-                $voter['epic'] ?? 
-                $voter['voter_id'] ?? 
-                $voter['voterId'] ?? 
-                $voter['sl_no'] ?? 
-                $voter['slNo'] ?? 
-                $voter['id'] ?? 
+                $voter['epic'] ??
+                $voter['voter_id'] ??
+                $voter['voterId'] ??
+                $voter['sl_no'] ??
+                $voter['slNo'] ??
+                $voter['id'] ??
                 ($i + 1)
             ));
 
-            // Sanitize voter ID for filename (e.g. JQB1586882)
             $safeVoterId = preg_replace('/[^A-Za-z0-9_\-]/', '', $voterIdNo);
             if ($safeVoterId === '') {
                 $safeVoterId = 'voter_' . ($i + 1);
             }
 
-            $fileName = $safeVoterId . '.jpg';
+            $photo = $voterPhotos[$i];
+            $fileName = $safeVoterId . '.' . $photo['extension'];
             $destFile = rtrim($targetDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $fileName;
             $relativePhotoUrl = rtrim($relativeDir, '/') . '/' . $fileName;
-
-            $fileSaved = false;
-
-            // Strategy A: Write extracted image from PDF if available
-            if (isset($voterPhotos[$i]) && !empty($voterPhotos[$i]['data'])) {
-                $written = @file_put_contents($destFile, $voterPhotos[$i]['data'], LOCK_EX);
-                if ($written !== false && $written > 100) {
-                    $fileSaved = true;
-                }
-            }
-
-            // Strategy B: If file already exists with valid size on disk, keep it
-            if (!$fileSaved && file_exists($destFile) && filesize($destFile) > 100) {
-                $fileSaved = true;
-            }
-
-            // Strategy C: Check existing photo pools in repository
-            if (!$fileSaved) {
-                $candidateExistingPhotos = [
-                    $projectRoot . DIRECTORY_SEPARATOR . 'photos' . DIRECTORY_SEPARATOR . $safeVoterId . '.jpg',
-                    $projectRoot . DIRECTORY_SEPARATOR . 'photos' . DIRECTORY_SEPARATOR . $voterIdNo . '.jpg',
-                    $projectRoot . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'photos' . DIRECTORY_SEPARATOR . $safeVoterId . '.jpg',
-                ];
-
-                foreach ($candidateExistingPhotos as $srcPhoto) {
-                    if (file_exists($srcPhoto) && is_readable($srcPhoto) && filesize($srcPhoto) > 50) {
-                        if (@copy($srcPhoto, $destFile)) {
-                            $fileSaved = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Strategy D: If voter record references a pre-existing path
-            if (!$fileSaved && !empty($voter['photo_url'])) {
-                $srcUrl = $voter['photo_url'];
-                $srcPath = $projectRoot . DIRECTORY_SEPARATOR . ltrim($srcUrl, '/\\');
-                if (file_exists($srcPath) && is_file($srcPath) && filesize($srcPath) > 50) {
-                    if (@copy($srcPath, $destFile)) {
-                        $fileSaved = true;
-                    }
-                }
-            }
-
-            // Strategy E: Guaranteed Fallback - Generate a proper 150x180 JPEG portrait photo badge
-            if (!$fileSaved || !file_exists($destFile) || filesize($destFile) < 10) {
-                $voterName = $voter['name_en'] ?? $voter['name'] ?? '';
-                $generatedJpg = self::generateVoterPhotoBadge($safeVoterId, $voterName);
-                @file_put_contents($destFile, $generatedJpg, LOCK_EX);
-                $fileSaved = true;
+            $written = @file_put_contents($destFile, $photo['data'], LOCK_EX);
+            if ($written !== strlen($photo['data'])) {
+                throw new RuntimeException("Unable to save the extracted voter photo: {$fileName}");
             }
 
             $savedPhotos[$i] = $relativePhotoUrl;
@@ -132,17 +84,18 @@ class PdfExtractor
     }
 
     /**
-     * Extracts all raw images from a PDF file using memory-efficient stream slicing and JPEG boundary detection.
+     * Extracts embedded image objects from a PDF, preserving JPEGs and losslessly encoding raw pixels as PNG.
      */
-    public static function extractImagesFromPdf($pdfPath)
+    public static function extractImagesFromPdf($pdfPath, &$imageObjectCount = null)
     {
+        $imageObjectCount = 0;
         $images = [];
 
         // Method 1: CLI pdfimages tool if available on server
         if (function_exists('exec') && !self::isFunctionDisabled('exec')) {
             $tmpDir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'pdf_imgs_' . uniqid();
             if (@mkdir($tmpDir, 0777, true)) {
-                $cmd = sprintf('pdfimages -png %s %s/img 2>&1', escapeshellarg($pdfPath), escapeshellarg($tmpDir));
+                $cmd = sprintf('pdfimages -all %s %s/img 2>&1', escapeshellarg($pdfPath), escapeshellarg($tmpDir));
                 @exec($cmd, $out, $ret);
                 if ($ret === 0) {
                     $found = glob($tmpDir . '/img-*.*');
@@ -153,12 +106,14 @@ class PdfExtractor
                             if (!empty($data)) {
                                 $ext = strtolower(pathinfo($imgPath, PATHINFO_EXTENSION));
                                 $info = @getimagesizefromstring($data);
-                                $images[] = [
-                                    'type' => $ext === 'png' ? 'png' : 'jpg',
-                                    'data' => $data,
-                                    'width' => $info[0] ?? 0,
-                                    'height' => $info[1] ?? 0,
-                                ];
+                                if ($info !== false) {
+                                    $images[] = [
+                                        'data' => $data,
+                                        'width' => $info[0],
+                                        'height' => $info[1],
+                                        'mime' => $info['mime'] ?? '',
+                                    ];
+                                }
                             }
                         }
                     }
@@ -166,9 +121,6 @@ class PdfExtractor
                 @array_map('unlink', glob($tmpDir . '/*'));
                 @rmdir($tmpDir);
 
-                if (!empty($images)) {
-                    return $images;
-                }
             }
         }
 
@@ -176,6 +128,14 @@ class PdfExtractor
         $pdf = @file_get_contents($pdfPath);
         if ($pdf === false || strlen($pdf) < 64) {
             return [];
+        }
+
+        $imageObjects = self::extractImageXObjects($pdf, $imageObjectCount);
+        if ($imageObjectCount > 0) {
+            if (count($imageObjects) === $imageObjectCount) {
+                return $imageObjects;
+            }
+            $images = $imageObjects;
         }
 
         $pdfLen = strlen($pdf);
@@ -217,12 +177,14 @@ class PdfExtractor
                     }
                     if (strlen($jpeg) > 200) {
                         $info = @getimagesizefromstring($jpeg);
-                        $images[] = [
-                            'type' => 'jpg',
-                            'data' => $jpeg,
-                            'width' => $info[0] ?? 0,
-                            'height' => $info[1] ?? 0,
-                        ];
+                        if ($info !== false) {
+                            $images[] = [
+                                'data' => $jpeg,
+                                'width' => $info[0],
+                                'height' => $info[1],
+                                'mime' => $info['mime'] ?? '',
+                            ];
+                        }
                     }
                 }
             } elseif ($isImage && (stripos($dictHeader, 'FlateDecode') !== false)) {
@@ -241,12 +203,14 @@ class PdfExtractor
                         }
                         if (strlen($jpeg) > 200) {
                             $info = @getimagesizefromstring($jpeg);
-                            $images[] = [
-                                'type' => 'jpg',
-                                'data' => $jpeg,
-                                'width' => $info[0] ?? 0,
-                                'height' => $info[1] ?? 0,
-                            ];
+                            if ($info !== false) {
+                                $images[] = [
+                                    'data' => $jpeg,
+                                    'width' => $info[0],
+                                    'height' => $info[1],
+                                    'mime' => $info['mime'] ?? '',
+                                ];
+                            }
                         }
                     }
                 }
@@ -255,44 +219,187 @@ class PdfExtractor
             $streamPos = $endPos + 9;
         }
 
-        // Method 3: Direct binary scan for JPEGs across the whole PDF file
-        if (count($images) < 5) {
-            $offset = 0;
-            while (($start = strpos($pdf, "\xFF\xD8\xFF", $offset)) !== false) {
-                // Find next JPEG SOI or end of file
-                $nextStart = strpos($pdf, "\xFF\xD8\xFF", $start + 4);
-                $sliceLen = ($nextStart !== false) ? ($nextStart - $start) : min(500000, $pdfLen - $start);
-                $slice = substr($pdf, $start, $sliceLen);
+        // Scan raw JPEG streams even when Poppler extracted other images.
+        $offset = 0;
+        while (($start = strpos($pdf, "\xFF\xD8\xFF", $offset)) !== false) {
+            $nextStart = strpos($pdf, "\xFF\xD8\xFF", $start + 4);
+            $sliceLen = ($nextStart !== false) ? ($nextStart - $start) : ($pdfLen - $start);
+            $slice = substr($pdf, $start, $sliceLen);
 
-                // Authentic EOI is the last \xFF\xD9 in this slice
-                $lastEoi = strrpos($slice, "\xFF\xD9");
-                if ($lastEoi !== false) {
-                    $jpegBytes = substr($slice, 0, $lastEoi + 2);
-                    if (strlen($jpegBytes) > 200) {
-                        $info = @getimagesizefromstring($jpegBytes);
-                        if (!empty($info) && ($info[0] ?? 0) > 20) {
-                            $images[] = [
-                                'type' => 'jpg',
-                                'data' => $jpegBytes,
-                                'width' => $info[0] ?? 0,
-                                'height' => $info[1] ?? 0,
-                            ];
-                        }
+            $lastEoi = strrpos($slice, "\xFF\xD9");
+            if ($lastEoi !== false) {
+                $jpegBytes = substr($slice, 0, $lastEoi + 2);
+                if (strlen($jpegBytes) > 200) {
+                    $info = @getimagesizefromstring($jpegBytes);
+                    if (!empty($info) && ($info[0] ?? 0) > 20) {
+                        $images[] = [
+                            'data' => $jpegBytes,
+                            'width' => $info[0],
+                            'height' => $info[1],
+                            'mime' => $info['mime'] ?? '',
+                        ];
                     }
-                    $offset = $start + $lastEoi + 2;
-                } else {
-                    $offset = $start + 3;
                 }
+                $offset = $start + $lastEoi + 2;
+            } else {
+                $offset = $start + 3;
             }
         }
 
-        return $images;
+        $uniqueImages = [];
+        $seenImages = [];
+        foreach ($images as $image) {
+            $hash = hash('sha256', $image['data']);
+            if (isset($seenImages[$hash])) {
+                continue;
+            }
+            $seenImages[$hash] = true;
+            $uniqueImages[] = $image;
+        }
+
+        return $uniqueImages;
     }
 
     /**
      * Filters out polling station wide building photos or header emblems to isolate voter portraits.
      */
-    private static function filterVoterPhotos(array $images)
+    private static function extractImageXObjects($pdf, &$imageObjectCount)
+    {
+        $images = [];
+        $imageObjectCount = 0;
+        if (!preg_match_all('/(\d+)\s+(\d+)\s+obj\b/', $pdf, $objects, PREG_OFFSET_CAPTURE)) {
+            return $images;
+        }
+
+        $objectCount = count($objects[0]);
+        for ($i = 0; $i < $objectCount; $i++) {
+            $objectStart = $objects[0][$i][1];
+            $objectBodyStart = $objectStart + strlen($objects[0][$i][0]);
+            $nextObjectStart = $i + 1 < $objectCount
+                ? $objects[0][$i + 1][1]
+                : strlen($pdf);
+            $streamPos = strpos($pdf, 'stream', $objectBodyStart);
+            if ($streamPos === false || $streamPos >= $nextObjectStart) {
+                continue;
+            }
+
+            $dictionary = substr($pdf, $objectBodyStart, $streamPos - $objectBodyStart);
+            if (!preg_match('/\/Subtype\s*\/Image\b/', $dictionary)) {
+                continue;
+            }
+            $imageObjectCount++;
+
+            $dataStart = $streamPos + 6;
+            if (($pdf[$dataStart] ?? '') === "\r") {
+                $dataStart++;
+            }
+            if (($pdf[$dataStart] ?? '') === "\n") {
+                $dataStart++;
+            }
+
+            if (preg_match('/\/Length\s+(\d+)\b/', $dictionary, $lengthMatch)) {
+                $streamLength = (int)$lengthMatch[1];
+                $streamBytes = substr($pdf, $dataStart, $streamLength);
+                if (strlen($streamBytes) !== $streamLength) {
+                    continue;
+                }
+            } else {
+                $endStream = strpos($pdf, 'endstream', $dataStart);
+                if ($endStream === false || $endStream >= $nextObjectStart) {
+                    continue;
+                }
+                $streamBytes = rtrim(substr($pdf, $dataStart, $endStream - $dataStart), "\r\n");
+            }
+
+            $mime = '';
+            $data = $streamBytes;
+            if (strpos($dictionary, '/DCTDecode') !== false) {
+                $mime = 'image/jpeg';
+            } elseif (strpos($dictionary, '/FlateDecode') !== false) {
+                $decoded = @gzuncompress($streamBytes);
+                if ($decoded === false) {
+                    $decoded = @gzinflate($streamBytes);
+                }
+                if ($decoded === false) {
+                    continue;
+                }
+
+                $data = self::encodeRawImageAsPng($decoded, $dictionary);
+                if ($data !== null) {
+                    $mime = 'image/png';
+                } else {
+                    $jpegStart = strpos($decoded, "\xFF\xD8\xFF");
+                    if ($jpegStart === false) {
+                        continue;
+                    }
+                    $jpegEnd = strrpos($decoded, "\xFF\xD9");
+                    if ($jpegEnd === false || $jpegEnd < $jpegStart) {
+                        continue;
+                    }
+                    $data = substr($decoded, $jpegStart, $jpegEnd + 2 - $jpegStart);
+                    if (@getimagesizefromstring($data) === false) {
+                        continue;
+                    }
+                    $mime = 'image/jpeg';
+                }
+            }
+
+            $info = @getimagesizefromstring($data);
+            if ($info === false || empty($info['mime'])) {
+                continue;
+            }
+            $images[] = [
+                'data' => $data,
+                'width' => $info[0],
+                'height' => $info[1],
+                'mime' => $info['mime'],
+            ];
+        }
+
+        return $images;
+    }
+
+    private static function encodeRawImageAsPng($pixels, $dictionary)
+    {
+        if (!preg_match('/\/Width\s+(\d+)\b/', $dictionary, $widthMatch) ||
+            !preg_match('/\/Height\s+(\d+)\b/', $dictionary, $heightMatch) ||
+            !preg_match('/\/BitsPerComponent\s+8\b/', $dictionary)) {
+            return null;
+        }
+
+        $width = (int)$widthMatch[1];
+        $height = (int)$heightMatch[1];
+        if ($width <= 0 || $height <= 0 || $width * $height > 5000000) {
+            return null;
+        }
+
+        $pixelCount = $width * $height;
+        $bytesPerPixel = intdiv(strlen($pixels), $pixelCount);
+        if (!in_array($bytesPerPixel, [1, 3], true) || strlen($pixels) !== $pixelCount * $bytesPerPixel) {
+            return null;
+        }
+
+        $scanlines = '';
+        $rowLength = $width * $bytesPerPixel;
+        for ($row = 0; $row < $height; $row++) {
+            $scanlines .= "\x00" . substr($pixels, $row * $rowLength, $rowLength);
+        }
+
+        $colorType = $bytesPerPixel === 3 ? 2 : 0;
+        $png = "\x89PNG\r\n\x1a\n";
+        $png .= self::pngChunk('IHDR', pack('NNCCCCC', $width, $height, 8, $colorType, 0, 0, 0));
+        $png .= self::pngChunk('IDAT', gzcompress($scanlines, 6));
+        $png .= self::pngChunk('IEND', '');
+        return $png;
+    }
+
+    private static function pngChunk($type, $data)
+    {
+        $chunk = $type . $data;
+        return pack('N', strlen($data)) . $chunk . pack('N', hexdec(hash('crc32b', $chunk)));
+    }
+
+    private static function filterVoterPhotos(array $images, $preserveAll = false)
     {
         if (empty($images)) {
             return [];
@@ -304,115 +411,28 @@ class PdfExtractor
             $h = $img['height'] ?? 0;
             $size = strlen($img['data'] ?? '');
 
-            // Skip tiny icons (< 150 bytes or < 30px)
-            if ($size < 150) {
+            $mime = $img['mime'] ?? '';
+            $extension = [
+                'image/jpeg' => 'jpg',
+                'image/png' => 'png',
+                'image/gif' => 'gif',
+                'image/webp' => 'webp',
+                'image/bmp' => 'bmp',
+            ][$mime] ?? null;
+            if (!$extension || (!$preserveAll && ($size < 100 || $w < 20 || $h < 20))) {
                 continue;
             }
 
-            // Filter out wide landscape polling station photos (width > 1.8 * height and width > 350)
-            if ($w > 0 && $h > 0) {
-                if ($w > 350 && ($w / $h > 1.7)) {
-                    continue;
-                }
+            $aspectRatio = $w / $h;
+            if (!$preserveAll && ($aspectRatio < 0.25 || $aspectRatio > 1.6)) {
+                continue;
             }
 
+            $img['extension'] = $extension;
             $voterPhotos[] = $img;
         }
 
-        return !empty($voterPhotos) ? $voterPhotos : $images;
-    }
-
-    /**
-     * Generates a 150x180 JPEG portrait voter photo badge with voter ID number.
-     * Guarantees a photo file is physically written to disk for every voter.
-     */
-    public static function generateVoterPhotoBadge($voterIdNo, $name = '')
-    {
-        if (function_exists('imagecreatetruecolor')) {
-            $w = 150;
-            $h = 180;
-            $img = imagecreatetruecolor($w, $h);
-
-            // Studio Gradient/Background
-            $bg = imagecolorallocate($img, 30, 41, 59);
-            imagefilledrectangle($img, 0, 0, $w, $h, $bg);
-
-            // Inner portrait area
-            $innerBg = imagecolorallocate($img, 226, 232, 240);
-            imagefilledrectangle($img, 2, 2, $w - 3, $h - 3, $innerBg);
-
-            // Border
-            $borderColor = imagecolorallocate($img, 148, 163, 184);
-            imagerectangle($img, 0, 0, $w - 1, $h - 1, $borderColor);
-
-            // Silhouette / Portrait Head & Shoulders
-            $hairColor = imagecolorallocate($img, 23, 23, 23);
-            $skinColor = imagecolorallocate($img, 210, 139, 87);
-            $clothesColor = imagecolorallocate($img, 59, 130, 246);
-
-            // Clothes / Shoulders
-            imagefilledarc($img, 75, 160, 120, 90, 180, 360, $clothesColor, IMG_ARC_PIE);
-
-            // Neck
-            imagefilledrectangle($img, 66, 95, 84, 120, $skinColor);
-
-            // Head / Face
-            imagefilledellipse($img, 75, 68, 52, 64, $skinColor);
-
-            // Hair
-            imagefilledarc($img, 75, 52, 54, 40, 180, 360, $hairColor, IMG_ARC_PIE);
-
-            // Eyes
-            $eyeColor = imagecolorallocate($img, 15, 23, 42);
-            imagefilledellipse($img, 65, 68, 6, 4, $eyeColor);
-            imagefilledellipse($img, 85, 68, 6, 4, $eyeColor);
-
-            // Voter ID Label Bar at bottom
-            $barBg = imagecolorallocate($img, 255, 255, 255);
-            $barBorder = imagecolorallocate($img, 100, 116, 139);
-            $textColor = imagecolorallocate($img, 15, 23, 42);
-
-            imagefilledrectangle($img, 4, $h - 26, $w - 5, $h - 5, $barBg);
-            imagerectangle($img, 4, $h - 26, $w - 5, $h - 5, $barBorder);
-
-            // Text centering
-            $idText = substr(trim((string)$voterIdNo), 0, 14);
-            $textX = max(6, (int)(($w - (strlen($idText) * 7)) / 2));
-            imagestring($img, 2, $textX, $h - 22, $idText, $textColor);
-
-            ob_start();
-            imagejpeg($img, null, 88);
-            $jpgData = ob_get_clean();
-            imagedestroy($img);
-
-            if (!empty($jpgData) && strlen($jpgData) > 500) {
-                return $jpgData;
-            }
-        }
-
-        // Guaranteed fallback from verified template file
-        $defaultPortraitPath = __DIR__ . '/data/default_portrait_b64.txt';
-        if (file_exists($defaultPortraitPath)) {
-            $b64 = trim(@file_get_contents($defaultPortraitPath));
-            if (!empty($b64)) {
-                $decoded = base64_decode($b64);
-                if ($decoded !== false && strlen($decoded) > 1000) {
-                    return $decoded;
-                }
-            }
-        }
-
-        // Check if an existing photo exists in uploads folder to use as template
-        $existingJpg = glob(__DIR__ . '/uploads/*/*/*/*/*/*.jpg');
-        if (!empty($existingJpg)) {
-            $data = @file_get_contents($existingJpg[0]);
-            if (!empty($data) && strlen($data) > 1000) {
-                return $data;
-            }
-        }
-
-        // Realistic emergency portrait JPEG (3.2KB baseline valid JPEG with portrait colors, never 1x1 black)
-        return hex2bin('ffd8ffe000104a46494600010101004800480000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc000110800b4009603012200021101031101ffda000c03010002110311003f00fbfefefeb7d55f00ffd9');
+        return $voterPhotos;
     }
 
     private static function isFunctionDisabled($function)

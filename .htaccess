@@ -9,6 +9,15 @@
     Header always set Access-Control-Max-Age "86400"
 </IfModule>
 
+<IfModule php_module>
+    php_value upload_max_filesize 128M
+    php_value post_max_size 130M
+    php_value memory_limit 512M
+    php_value max_execution_time 300
+    php_value max_input_time 300
+    php_flag display_errors Off
+</IfModule>
+
 <IfModule mod_rewrite.c>
     Options -MultiViews
     RewriteEngine On
@@ -30,6 +39,7 @@
     RewriteRule ^api/auth/login/?$ routes/auth.php [QSA,L]
     RewriteRule ^api/auth/?$ routes/auth.php [QSA,L]
     RewriteRule ^api/voters/vote/?$ routes/voters.php?action=vote [QSA,L]
+    RewriteRule ^api/voters/out-of-station/?$ routes/voters.php?action=out-of-station [QSA,L]
     RewriteRule ^api/voters/flag/?$ routes/voters.php?action=flag [QSA,L]
     RewriteRule ^api/voters/reset-votes/?$ routes/voters.php?action=reset-votes [QSA,L]
     RewriteRule ^api/voters/edit/?$ routes/voters.php?action=edit [QSA,L]

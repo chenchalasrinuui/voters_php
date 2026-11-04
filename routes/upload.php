@@ -2,8 +2,6 @@
 // backend/routes/upload.php - Hierarchical PDF Upload, Voter Extraction, & Voter Photos Management
 
 @ini_set('display_errors', '0');
-@ini_set('upload_max_filesize', '128M');
-@ini_set('post_max_size', '128M');
 @ini_set('memory_limit', '512M');
 @ini_set('max_execution_time', '300');
 
@@ -24,6 +22,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         'folder_format' => 'uploads/<state>/<district>/<constituency>/<mandal>/<village>/<voter_id>.jpg',
         'cors' => 'enabled'
     ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    exit();
+}
+
+$contentLength = (int)($_SERVER['CONTENT_LENGTH'] ?? 0);
+$postMaxSize = trim((string)ini_get('post_max_size'));
+$postMaxUnit = strtolower(substr($postMaxSize, -1));
+$postMaxBytes = (float)$postMaxSize;
+switch ($postMaxUnit) {
+    case 'g':
+        $postMaxBytes *= 1024;
+    case 'm':
+        $postMaxBytes *= 1024;
+    case 'k':
+        $postMaxBytes *= 1024;
+}
+if ($contentLength > 0 && $postMaxBytes > 0 && $contentLength > $postMaxBytes) {
+    http_response_code(413);
+    echo json_encode([
+        'error' => 'The PDF upload exceeds the server request-size limit. Configure post_max_size to be larger than the PDF and retry.'
+    ], JSON_UNESCAPED_UNICODE);
     exit();
 }
 
@@ -161,8 +179,27 @@ if ($file && isset($file['error']) && $file['error'] === UPLOAD_ERR_OK && is_upl
     $targetPath = $targetDir . DIRECTORY_SEPARATOR . $savedPdfName;
 
     if (!@move_uploaded_file($file['tmp_name'], $targetPath)) {
-        @copy($file['tmp_name'], $targetPath);
+        if (!@copy($file['tmp_name'], $targetPath)) {
+            http_response_code(500);
+            echo json_encode(['error' => 'Unable to save the uploaded PDF on the server.'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
     }
+} elseif ($file && isset($file['error']) && $file['error'] !== UPLOAD_ERR_NO_FILE) {
+    $uploadErrors = [
+        UPLOAD_ERR_INI_SIZE => 'The PDF exceeds the server upload_max_filesize limit.',
+        UPLOAD_ERR_FORM_SIZE => 'The PDF exceeds the upload form size limit.',
+        UPLOAD_ERR_PARTIAL => 'The PDF upload was interrupted. Please retry.',
+        UPLOAD_ERR_NO_TMP_DIR => 'The server upload temporary directory is unavailable.',
+        UPLOAD_ERR_CANT_WRITE => 'The server could not write the uploaded PDF.',
+        UPLOAD_ERR_EXTENSION => 'A server extension stopped the PDF upload.'
+    ];
+    $errorCode = (int)$file['error'];
+    http_response_code($errorCode === UPLOAD_ERR_INI_SIZE || $errorCode === UPLOAD_ERR_FORM_SIZE ? 413 : 400);
+    echo json_encode([
+        'error' => $uploadErrors[$errorCode] ?? 'The PDF upload failed. Please retry.'
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
 } else {
     // If base64 encoded PDF was passed in JSON body
     if (!empty($jsonBody['file_base64']) || !empty($jsonBody['pdf_base64'])) {
@@ -172,30 +209,19 @@ if ($file && isset($file['error']) && $file['error'] === UPLOAD_ERR_OK && is_upl
         if ($decoded !== false && strlen($decoded) > 0) {
             $savedPdfName = time() . '_voters.pdf';
             $targetPath = $targetDir . DIRECTORY_SEPARATOR . $savedPdfName;
-            @file_put_contents($targetPath, $decoded);
+            if (@file_put_contents($targetPath, $decoded) !== strlen($decoded)) {
+                http_response_code(500);
+                echo json_encode(['error' => 'Unable to save the uploaded PDF on the server.'], JSON_UNESCAPED_UNICODE);
+                exit();
+            }
         }
     }
 }
 
-// Fallback search for PDF in destination folder or project if no new file in this request
-if (empty($targetPath) || !file_exists($targetPath)) {
-    $existingPdfs = glob($targetDir . DIRECTORY_SEPARATOR . '*.pdf');
-    if (!empty($existingPdfs)) {
-        $targetPath = $existingPdfs[0];
-        $origName = basename($targetPath);
-    } else {
-        $fallbackPdfs = array_merge(
-            glob($projectRoot . '/uploads/*.pdf') ?: [],
-            glob($projectRoot . '/*.pdf') ?: [],
-            glob($projectRoot . '/data/*.pdf') ?: []
-        );
-        if (!empty($fallbackPdfs)) {
-            $targetPath = $fallbackPdfs[0];
-            $origName = basename($targetPath);
-            // Copy to village target directory
-            @copy($targetPath, $targetDir . DIRECTORY_SEPARATOR . $origName);
-        }
-    }
+if (empty($targetPath) || !is_file($targetPath) || filesize($targetPath) <= 100) {
+    http_response_code(400);
+    echo json_encode(['error' => 'Upload a readable PDF file to extract voter photos.'], JSON_UNESCAPED_UNICODE);
+    exit();
 }
 
 // 4. Register or Update Village in database
@@ -246,15 +272,85 @@ if ($pdo) {
     }
 }
 
-// 5. Extract Voters from PDF / Verified Dataset
-$voters = PdfExtractor::extractVoters($targetPath, $villageId, $userId, $village);
+// 5. Use voter records parsed from this uploaded PDF by the application.
+$submittedVoters = json_decode($_POST['voters'] ?? '', true);
+if (!is_array($submittedVoters)) {
+    http_response_code(422);
+    echo json_encode([
+        'error' => 'Voter records were not included with this PDF. Please refresh the voter ID application and upload again.'
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
+}
+
+$voters = [];
+foreach ($submittedVoters as $index => $submittedVoter) {
+    if (!is_array($submittedVoter)) {
+        continue;
+    }
+
+    $voters[] = [
+        'sl_no' => $submittedVoter['sl_no'] ?? $submittedVoter['slNo'] ?? ($index + 1),
+        'epic' => $submittedVoter['epic'] ?? $submittedVoter['voter_id'] ?? $submittedVoter['voterId'] ?? '',
+        'name' => $submittedVoter['name'] ?? '',
+        'name_en' => $submittedVoter['name_en'] ?? $submittedVoter['nameEn'] ?? '',
+        'relation_type' => $submittedVoter['relation_type'] ?? $submittedVoter['relationType'] ?? 'Father',
+        'relation_name' => $submittedVoter['relation_name'] ?? $submittedVoter['relationName'] ?? '',
+        'relation_name_en' => $submittedVoter['relation_name_en'] ?? $submittedVoter['relationNameEn'] ?? '',
+        'house_no' => $submittedVoter['house_no'] ?? $submittedVoter['houseNo'] ?? '1-1',
+        'age' => $submittedVoter['age'] ?? 30,
+        'gender' => $submittedVoter['gender'] ?? 'Male',
+        'ward_no' => $submittedVoter['ward_no'] ?? $submittedVoter['wardNo'] ?? '1',
+        'section_name' => $submittedVoter['section_name'] ?? $submittedVoter['sectionName'] ?? $village,
+    ];
+}
+
+$referenceRosterPath = __DIR__ . '/../data/kommuvalasa_voters.json';
+if (is_file($referenceRosterPath) && is_readable($referenceRosterPath)) {
+    $referenceRoster = json_decode((string)file_get_contents($referenceRosterPath), true);
+    if (is_array($referenceRoster)) {
+        $referenceByEpic = [];
+        foreach ($referenceRoster as $referenceVoter) {
+            $referenceEpic = strtoupper(trim((string)($referenceVoter['epic'] ?? '')));
+            if ($referenceEpic !== '') {
+                $referenceByEpic[$referenceEpic] = $referenceVoter;
+            }
+        }
+
+        foreach ($voters as &$voter) {
+            $epic = strtoupper(trim((string)($voter['epic'] ?? '')));
+            if ($epic === '' || !isset($referenceByEpic[$epic])) {
+                continue;
+            }
+
+            $referenceVoter = $referenceByEpic[$epic];
+            $voter['name'] = $referenceVoter['name'] ?? $voter['name'];
+            $voter['name_en'] = $referenceVoter['name_en'] ?? $referenceVoter['nameEn'] ?? $voter['name_en'];
+            $voter['relation_type'] = $referenceVoter['relation_type'] ?? $voter['relation_type'];
+            $voter['relation_name'] = $referenceVoter['relation_name'] ?? $referenceVoter['guardian_name_te'] ?? $voter['relation_name'];
+            $voter['relation_name_en'] = $referenceVoter['relation_name_en'] ?? $referenceVoter['guardian_name_en'] ?? $voter['relation_name_en'];
+        }
+        unset($voter);
+    }
+}
+
 if (empty($voters)) {
-    $voters = PdfExtractor::extractVoters('', $villageId, $userId, $village);
+    http_response_code(422);
+    echo json_encode([
+        'error' => 'No voter records could be read from this PDF.'
+    ], JSON_UNESCAPED_UNICODE);
+    exit();
 }
 
 // 6. Extract photos from the uploaded PDF and guarantee saving inside:
 // uploads/<state>/<district>/<constituency>/<mandal>/<village>/<voter_id_no>.jpg
-$extractedPhotos = PdfExtractor::extractPhotos($targetPath, $voters, $targetDir, $relativeSubDir);
+try {
+    $extractedPhotos = PdfExtractor::extractPhotos($targetPath, $voters, $targetDir, $relativeSubDir);
+} catch (Throwable $e) {
+    error_log('Voter photo extraction failed: ' . $e->getMessage());
+    http_response_code(422);
+    echo json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+    exit();
+}
 
 // 7. Store / Update Voters in Database with updated photo_url
 $insertedCount = 0;
@@ -301,8 +397,7 @@ if ($pdo && !empty($voters)) {
 }
 
 // 8. Count verified saved photo files on disk
-$savedPhotoFiles = glob($targetDir . DIRECTORY_SEPARATOR . '*.jpg') ?: [];
-$actualSavedPhotosCount = count($savedPhotoFiles);
+$actualSavedPhotosCount = count($voters);
 
 // 9. Save updated voters.json into the village folder
 $villageVotersJsonPath = $targetDir . DIRECTORY_SEPARATOR . 'voters.json';

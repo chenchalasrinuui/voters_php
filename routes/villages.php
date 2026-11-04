@@ -3,6 +3,7 @@
 
 require_once __DIR__ . '/../cors.php';
 require_once __DIR__ . '/../database.php';
+require_once __DIR__ . '/../auth_session.php';
 
 header("Content-Type: application/json; charset=UTF-8");
 
@@ -98,30 +99,6 @@ if (
         }
     }
 
-    // Lookup village row before deletion
-    $vRow = null;
-    if ($pdo) {
-        try {
-            if ($targetVillageId > 0) {
-                $vStmt = $pdo->prepare("SELECT * FROM villages WHERE id = ? LIMIT 1");
-                $vStmt->execute([$targetVillageId]);
-                $vRow = $vStmt->fetch();
-                if ($vRow && empty($vName)) {
-                    $vName = $vRow['village_name'];
-                }
-            } elseif (!empty($vName)) {
-                $vStmt = $pdo->prepare("SELECT * FROM villages WHERE village_name = ? OR village_name_te = ? LIMIT 1");
-                $vStmt->execute([$vName, $vName]);
-                $vRow = $vStmt->fetch();
-                if ($vRow) {
-                    $targetVillageId = (int)$vRow['id'];
-                }
-            }
-        } catch (Throwable $e) {
-            error_log("Village lookup error before delete: " . $e->getMessage());
-        }
-    }
-
     if ($targetVillageId <= 0 && empty($vName)) {
         http_response_code(400);
         echo json_encode([
@@ -131,52 +108,104 @@ if (
         exit();
     }
 
-    // Two-stage deletion:
-    // 1. FIRST delete the voters under this village from voters table
-    // 2. THEN delete the village from villages table
-    $deletedVoters = 0;
-    $deletedVillages = 0;
-
-    if ($pdo) {
-        try {
-            $pdo->beginTransaction();
-
-            if ($targetVillageId > 0) {
-                // Step 1: FIRST delete voters under this village from voters table
-                $delVotersStmt = $pdo->prepare("DELETE FROM voters WHERE village_id = ?");
-                $delVotersStmt->execute([$targetVillageId]);
-                $deletedVoters = $delVotersStmt->rowCount();
-
-                // Step 2: THEN delete the village from villages table
-                $delVillageStmt = $pdo->prepare("DELETE FROM villages WHERE id = ?");
-                $delVillageStmt->execute([$targetVillageId]);
-                $deletedVillages = $delVillageStmt->rowCount();
-            } elseif (!empty($vName)) {
-                // Find all matching village IDs
-                $findStmt = $pdo->prepare("SELECT id FROM villages WHERE village_name = ? OR village_name_te = ?");
-                $findStmt->execute([$vName, $vName]);
-                $ids = $findStmt->fetchAll(PDO::FETCH_COLUMN);
-
-                if (!empty($ids)) {
-                    $inList = implode(',', array_map('intval', $ids));
-                    // Step 1: FIRST delete voters under this village
-                    $deletedVoters = $pdo->exec("DELETE FROM voters WHERE village_id IN ($inList)");
-                    // Step 2: THEN delete the village
-                    $deletedVillages = $pdo->exec("DELETE FROM villages WHERE id IN ($inList)");
-                }
-            }
-
-            $pdo->commit();
-        } catch (Throwable $e) {
-            if ($pdo->inTransaction()) {
-                $pdo->rollBack();
-            }
-            error_log("Village and voters deletion warning: " . $e->getMessage());
-        }
+    if (!$pdo) {
+        http_response_code(503);
+        echo json_encode([
+            'error' => 'Database connection is unavailable. No records were deleted.',
+            'success' => false
+        ], JSON_UNESCAPED_UNICODE);
+        exit();
     }
 
-    // Clean up village folder and extracted photos from filesystem
-    if ($vRow) {
+    $superAdminId = requireSuperAdminSession($pdo);
+
+    $deletedVoters = 0;
+    $deletedVillages = 0;
+    $vRows = [];
+
+    try {
+        $pdo->beginTransaction();
+
+        if ($targetVillageId > 0) {
+            $vStmt = $pdo->prepare("SELECT * FROM villages WHERE id = ? LIMIT 1");
+            $vStmt->execute([$targetVillageId]);
+            $vRow = $vStmt->fetch(PDO::FETCH_ASSOC);
+            if ($vRow) {
+                $vRows[] = $vRow;
+            }
+        } else {
+            $vStmt = $pdo->prepare("SELECT * FROM villages WHERE village_name = ? OR village_name_te = ?");
+            $vStmt->execute([$vName, $vName]);
+            $vRows = $vStmt->fetchAll(PDO::FETCH_ASSOC);
+        }
+
+        if (!$vRows) {
+            $pdo->rollBack();
+            http_response_code(404);
+            echo json_encode([
+                'error' => 'Village not found. No records were deleted.',
+                'success' => false
+            ], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+
+        $ownerStmt = $pdo->prepare("
+            SELECT u.created_by_admin_id
+            FROM villages v
+            INNER JOIN users u ON u.id = v.user_id
+            WHERE v.id = ?
+            LIMIT 1
+        ");
+        foreach ($vRows as $vRow) {
+            $ownerStmt->execute([(int)$vRow['id']]);
+            $creatorAdminId = $ownerStmt->fetchColumn();
+            if ($creatorAdminId === false || (int)$creatorAdminId !== $superAdminId) {
+                $pdo->rollBack();
+                http_response_code(403);
+                echo json_encode([
+                    'error' => 'You can delete this village and its voters only if your super-admin account created its user.',
+                    'success' => false
+                ], JSON_UNESCAPED_UNICODE);
+                exit();
+            }
+        }
+
+        $ids = array_map(static function ($village) {
+            return (int)$village['id'];
+        }, $vRows);
+        $targetVillageId = $ids[0];
+        if (empty($vName)) {
+            $vName = $vRows[0]['village_name'] ?? '';
+        }
+        $placeholders = implode(',', array_fill(0, count($ids), '?'));
+
+        $delVotersStmt = $pdo->prepare("DELETE FROM voters WHERE village_id IN ($placeholders)");
+        $delVotersStmt->execute($ids);
+        $deletedVoters = $delVotersStmt->rowCount();
+
+        $delVillageStmt = $pdo->prepare("DELETE FROM villages WHERE id IN ($placeholders)");
+        $delVillageStmt->execute($ids);
+        $deletedVillages = $delVillageStmt->rowCount();
+        if ($deletedVillages !== count($ids)) {
+            throw new RuntimeException('Village deletion was incomplete.');
+        }
+
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        error_log("Village and voters deletion failed: " . $e->getMessage());
+        http_response_code(500);
+        echo json_encode([
+            'error' => 'Failed to delete the village and its voter records. No records were deleted.',
+            'success' => false
+        ], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+
+    // Clean up village folders only after the database transaction commits.
+    foreach ($vRows as $vRow) {
         $state = trim($vRow['state'] ?? '');
         $district = trim($vRow['district'] ?? '');
         $constituency = trim($vRow['constituency'] ?? '');
@@ -214,9 +243,11 @@ if ($method === 'GET') {
         try {
             if ($role === 'admin') {
                 $stmt = $pdo->query("
-                    SELECT v.*, COUNT(vt.id) as voter_count,
+                    SELECT v.*, MAX(u.created_by_admin_id) AS created_by_admin_id,
+                           COUNT(vt.id) as voter_count,
                            SUM(CASE WHEN vt.is_voted = 1 THEN 1 ELSE 0 END) as voted_count
                     FROM villages v
+                    LEFT JOIN users u ON u.id = v.user_id
                     LEFT JOIN voters vt ON vt.village_id = v.id
                     GROUP BY v.id
                     ORDER BY v.id ASC
@@ -276,7 +307,8 @@ if ($method === 'GET') {
             'fileName' => $v['pdf_filename'] ?? ($isKommu ? 'KOMMUVALASA_NEW_VOTER_WARD_LIST_2026.pdf' : (($v['village_name'] ?? 'village') . '.pdf')),
             'isDefault' => $isKommu,
             'voterCount' => (int)($v['voter_count'] ?? 806),
-            'votedCount' => (int)($v['voted_count'] ?? 0)
+            'votedCount' => (int)($v['voted_count'] ?? 0),
+            'createdByAdminId' => isset($v['created_by_admin_id']) ? (int)$v['created_by_admin_id'] : null
         ];
     }, $villages);
 

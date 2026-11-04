@@ -1,0 +1,2 @@
+ALTER TABLE voters
+  ADD COLUMN expected_to_return TINYINT(1) NULL DEFAULT NULL;

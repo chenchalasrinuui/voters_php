@@ -14,6 +14,89 @@ $action = $_GET['action'] ?? '';
 $raw = file_get_contents('php://input');
 $body = json_decode($raw, true) ?? [];
 
+// POST /api/voters/out-of-station - Update station status and contact phone
+if ($action === 'out-of-station' || (isset($body['action']) && $body['action'] === 'out-of-station')) {
+    if ($method !== 'POST') {
+        http_response_code(405);
+        echo json_encode(['error' => 'POST is required'], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+
+    $voterId = $body['voterId'] ?? $body['id'] ?? null;
+    $outOfStation = $body['out_of_station'] ?? $body['outOfStation'] ?? null;
+    $phoneNumber = trim((string)($body['phone_number'] ?? $body['phoneNumber'] ?? ''));
+    $location = trim((string)($body['location'] ?? $body['out_of_station_location'] ?? ''));
+    $expectedToReturn = $body['expected_to_return'] ?? $body['expectedToReturn'] ?? null;
+    $isOutOfStation = in_array($outOfStation, [true, 1, '1'], true);
+
+    if (!$voterId || !in_array($outOfStation, [true, false, 0, 1, '0', '1'], true)) {
+        http_response_code(400);
+        echo json_encode(['error' => 'Voter ID and a valid out-of-station status are required'], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+
+    if ($isOutOfStation) {
+        if (!in_array($expectedToReturn, [true, false, 0, 1, '0', '1'], true)) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Choose whether the voter is expected to return'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+        if ($phoneNumber !== '') {
+            $digitCount = preg_match_all('/[0-9]/', $phoneNumber);
+            if (!preg_match('/^\+?[0-9\s().-]{7,20}$/', $phoneNumber) || $digitCount < 7 || $digitCount > 15) {
+                http_response_code(400);
+                echo json_encode(['error' => 'Enter a valid phone number with 7 to 15 digits, or leave it empty'], JSON_UNESCAPED_UNICODE);
+                exit();
+            }
+        }
+        $locationLength = function_exists('mb_strlen') ? mb_strlen($location, 'UTF-8') : strlen($location);
+        if ($location === '' || $locationLength > 120) {
+            http_response_code(400);
+            echo json_encode(['error' => 'A location of up to 120 characters is required'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+    }
+
+    try {
+        $stmt = $pdo->prepare("
+            UPDATE voters
+            SET out_of_station = ?, out_of_station_phone = ?, out_of_station_location = ?, expected_to_return = ?
+            WHERE id = ? OR epic = ? OR sl_no = ?
+        ");
+        $stmt->execute([
+            $isOutOfStation ? 1 : 0,
+            $isOutOfStation && $phoneNumber !== '' ? $phoneNumber : null,
+            $isOutOfStation ? $location : null,
+            $isOutOfStation ? (in_array($expectedToReturn, [true, 1, '1'], true) ? 1 : 0) : null,
+            $voterId,
+            $voterId,
+            $voterId
+        ]);
+
+        $voter = $pdo->prepare("SELECT id, out_of_station, out_of_station_phone, out_of_station_location, expected_to_return FROM voters WHERE id = ? OR epic = ? OR sl_no = ? LIMIT 1");
+        $voter->execute([$voterId, $voterId, $voterId]);
+        $savedVoter = $voter->fetch();
+        if (!$savedVoter) {
+            http_response_code(404);
+            echo json_encode(['error' => 'Voter not found'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+
+        echo json_encode([
+            'success' => true,
+            'out_of_station' => (int)$savedVoter['out_of_station'],
+            'out_of_station_phone' => $savedVoter['out_of_station_phone'],
+            'out_of_station_location' => $savedVoter['out_of_station_location'],
+            'expected_to_return' => $savedVoter['expected_to_return'] === null ? null : (int)$savedVoter['expected_to_return']
+        ], JSON_UNESCAPED_UNICODE);
+        exit();
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+}
+
 // 1. POST /api/voters/vote - Toggle Mark as Voted
 if ($action === 'vote' || (isset($body['action']) && $body['action'] === 'vote')) {
     $voterId = $body['voterId'] ?? $body['id'] ?? null;
@@ -265,6 +348,10 @@ if ($method === 'GET') {
                         'wardNo' => (string)($v['wardNo'] ?? '1'),
                         'is_voted' => 0,
                         'votingStatus' => 'NOT_VOTED',
+                        'out_of_station' => 0,
+                        'out_of_station_phone' => null,
+                        'out_of_station_location' => null,
+                        'expected_to_return' => null,
                         'flag_color' => 'none',
                         'flagColor' => 'none'
                     ];
@@ -319,6 +406,10 @@ if ($method === 'GET') {
                 'photoUrl' => $photo,
                 'is_voted' => (int)($r['is_voted'] ?? 0),
                 'votingStatus' => ($r['is_voted'] ?? 0) == 1 ? 'VOTED' : 'NOT_VOTED',
+                'out_of_station' => (int)($r['out_of_station'] ?? 0),
+                'out_of_station_phone' => $r['out_of_station_phone'] ?? null,
+                'out_of_station_location' => $r['out_of_station_location'] ?? null,
+                'expected_to_return' => isset($r['expected_to_return']) ? (int)$r['expected_to_return'] : null,
                 'flag_color' => $r['flag_color'] ?? 'none',
                 'flagColor' => $r['flag_color'] ?? 'none',
             ];

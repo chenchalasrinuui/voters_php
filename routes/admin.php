@@ -3,6 +3,7 @@
 
 require_once __DIR__ . '/../cors.php';
 require_once __DIR__ . '/../database.php';
+require_once __DIR__ . '/../auth_session.php';
 
 header("Content-Type: application/json; charset=UTF-8");
 
@@ -52,6 +53,7 @@ if (($action === 'users' || $action === '') && $method === 'GET') {
         $stmt = $pdo->query("
             SELECT 
                 u.id, u.username, u.name, u.state, u.district, u.constituency, u.mandal, u.village, u.status, u.created_at,
+                u.created_by_admin_id,
                 COUNT(DISTINCT v.id) as villages_count,
                 COUNT(DISTINCT vt.id) as voters_count,
                 SUM(CASE WHEN vt.is_voted = 1 THEN 1 ELSE 0 END) as voted_count
@@ -73,6 +75,7 @@ if (($action === 'users' || $action === '') && $method === 'GET') {
 
 // 3. POST /api/admin/users - Create new user (User Creation Form)
 if (($action === 'users' || $action === 'create') && $method === 'POST') {
+    $creatorAdminId = requireSuperAdminSession($pdo);
     $username = trim($body['username'] ?? '');
     $password = trim($body['password'] ?? '');
     $name = trim($body['name'] ?? '');
@@ -98,29 +101,20 @@ if (($action === 'users' || $action === 'create') && $method === 'POST') {
             exit();
         }
 
+        $pdo->beginTransaction();
         $ins = $pdo->prepare("
-            INSERT INTO users (username, password, name, state, district, constituency, mandal, village, role, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'user', 'active')
+            INSERT INTO users (username, password, name, state, district, constituency, mandal, village, role, status, created_by_admin_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'user', 'active', ?)
         ");
-        $ins->execute([$username, $password, $name, $state, $district, $constituency, $mandal, $village]);
+        $ins->execute([$username, $password, $name, $state, $district, $constituency, $mandal, $village, $creatorAdminId]);
         $newId = (int)$pdo->lastInsertId();
 
-        // Also create a starting village entry for this user
         $insV = $pdo->prepare("
             INSERT INTO villages (user_id, village_name, village_name_te, state, district, constituency, mandal, booth_name, part_no)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
-        $insV->execute([
-            $newId,
-            $village,
-            $village,
-            $state,
-            $district,
-            $constituency,
-            $mandal,
-            $village . ' పోలింగ్ కేంద్రం',
-            '1'
-        ]);
+        $insV->execute([$newId, $village, $village, $state, $district, $constituency, $mandal, $village . ' పోలింగ్ కేంద్రం', '1']);
+        $pdo->commit();
 
         echo json_encode([
             'id' => $newId,
@@ -138,6 +132,9 @@ if (($action === 'users' || $action === 'create') && $method === 'POST') {
         ], JSON_UNESCAPED_UNICODE);
         exit();
     } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
         http_response_code(500);
         echo json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
         exit();
@@ -169,6 +166,7 @@ if ($action === 'toggle-user') {
 
 // 5. DELETE /api/admin/users/:id or action=delete-user
 if ($action === 'delete-user' || ($method === 'DELETE' && isset($_GET['id']))) {
+    $superAdminId = requireSuperAdminSession($pdo);
     $userId = (int)($_GET['id'] ?? $body['userId'] ?? $body['id'] ?? 0);
 
     if ($userId <= 0) {
@@ -178,6 +176,20 @@ if ($action === 'delete-user' || ($method === 'DELETE' && isset($_GET['id']))) {
     }
 
     try {
+        $owner = $pdo->prepare("SELECT created_by_admin_id FROM users WHERE id = ? LIMIT 1");
+        $owner->execute([$userId]);
+        $creatorAdminId = $owner->fetchColumn();
+        if ($creatorAdminId === false) {
+            http_response_code(404);
+            echo json_encode(['error' => 'User not found.'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+        if ((int)$creatorAdminId !== $superAdminId) {
+            http_response_code(403);
+            echo json_encode(['error' => 'You can delete only users created by your super-admin account.'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+
         $pdo->beginTransaction();
         $pdo->prepare("DELETE FROM voters WHERE user_id = ?")->execute([$userId]);
         $pdo->prepare("DELETE FROM villages WHERE user_id = ?")->execute([$userId]);
