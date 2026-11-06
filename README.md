@@ -59,3 +59,9 @@ voter records. Sign in again after applying the migration to receive a server
 session. Existing users are left unassigned by this migration; set their
 `created_by_admin_id` to the verified creator's `admin.id` before enabling
 their village deletion.
+
+Apply
+[`migrations/20261106_add_voter_family_grouping.sql`](./migrations/20261106_add_voter_family_grouping.sql)
+to add the family-head and family-head EPIC fields used to group voters.
+Mark the head first, then enter that voter's EPIC on each family member's
+details modal. A family head cannot be unmarked until its members are reassigned.

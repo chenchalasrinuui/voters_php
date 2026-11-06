@@ -58,23 +58,35 @@ if ($action === 'out-of-station' || (isset($body['action']) && $body['action'] =
     }
 
     try {
+        $targetStmt = $pdo->prepare("SELECT id, flag_color FROM voters WHERE id = ? OR epic = ? OR sl_no = ? LIMIT 1");
+        $targetStmt->execute([$voterId, $voterId, $voterId]);
+        $targetVoter = $targetStmt->fetch();
+        if (!$targetVoter) {
+            http_response_code(404);
+            echo json_encode(['error' => 'Voter not found'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+        if (in_array(strtolower((string)($targetVoter['flag_color'] ?? 'none')), ['dead', 'duplicate'], true)) {
+            http_response_code(409);
+            echo json_encode(['error' => 'Out-of-station actions are disabled for Dead and Duplicate voters'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+
         $stmt = $pdo->prepare("
             UPDATE voters
             SET out_of_station = ?, out_of_station_phone = ?, out_of_station_location = ?, expected_to_return = ?
-            WHERE id = ? OR epic = ? OR sl_no = ?
+            WHERE id = ?
         ");
         $stmt->execute([
             $isOutOfStation ? 1 : 0,
             $isOutOfStation && $phoneNumber !== '' ? $phoneNumber : null,
             $isOutOfStation ? $location : null,
             $isOutOfStation ? (in_array($expectedToReturn, [true, 1, '1'], true) ? 1 : 0) : null,
-            $voterId,
-            $voterId,
-            $voterId
+            $targetVoter['id']
         ]);
 
-        $voter = $pdo->prepare("SELECT id, out_of_station, out_of_station_phone, out_of_station_location, expected_to_return FROM voters WHERE id = ? OR epic = ? OR sl_no = ? LIMIT 1");
-        $voter->execute([$voterId, $voterId, $voterId]);
+        $voter = $pdo->prepare("SELECT id, out_of_station, out_of_station_phone, out_of_station_location, expected_to_return FROM voters WHERE id = ? LIMIT 1");
+        $voter->execute([$targetVoter['id']]);
         $savedVoter = $voter->fetch();
         if (!$savedVoter) {
             http_response_code(404);
@@ -109,28 +121,42 @@ if ($action === 'vote' || (isset($body['action']) && $body['action'] === 'vote')
     }
 
     try {
+        $targetStmt = $pdo->prepare("SELECT id, flag_color FROM voters WHERE id = ? OR epic = ? OR sl_no = ? LIMIT 1");
+        $targetStmt->execute([$voterId, $voterId, $voterId]);
+        $targetVoter = $targetStmt->fetch();
+        if (!$targetVoter) {
+            http_response_code(404);
+            echo json_encode(['error' => 'Voter not found'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+        if (in_array(strtolower((string)($targetVoter['flag_color'] ?? 'none')), ['dead', 'duplicate'], true)) {
+            http_response_code(409);
+            echo json_encode(['error' => 'Voting actions are disabled for Dead and Duplicate voters'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+
         if ($status !== null) {
             $isVoted = ($status === 'VOTED' || $status === 1 || $status === '1') ? 1 : 0;
             $stmt = $pdo->prepare("
                 UPDATE voters 
                 SET is_voted = ?, 
                     voted_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END
-                WHERE id = ? OR epic = ? OR sl_no = ?
+                WHERE id = ?
             ");
-            $stmt->execute([$isVoted, $isVoted, $voterId, $voterId, $voterId]);
+            $stmt->execute([$isVoted, $isVoted, $targetVoter['id']]);
         } else {
             // Toggle
             $stmt = $pdo->prepare("
                 UPDATE voters 
                 SET is_voted = CASE WHEN is_voted = 1 THEN 0 ELSE 1 END,
                     voted_at = CASE WHEN is_voted = 0 THEN CURRENT_TIMESTAMP ELSE NULL END
-                WHERE id = ? OR epic = ? OR sl_no = ?
+                WHERE id = ?
             ");
-            $stmt->execute([$voterId, $voterId, $voterId]);
+            $stmt->execute([$targetVoter['id']]);
         }
 
-        $voter = $pdo->prepare("SELECT * FROM voters WHERE id = ? OR epic = ? OR sl_no = ? LIMIT 1");
-        $voter->execute([$voterId, $voterId, $voterId]);
+        $voter = $pdo->prepare("SELECT * FROM voters WHERE id = ? LIMIT 1");
+        $voter->execute([$targetVoter['id']]);
         $res = $voter->fetch();
 
         echo json_encode([
@@ -151,7 +177,7 @@ if ($action === 'flag' || (isset($body['action']) && $body['action'] === 'flag')
     $voterId = $body['voterId'] ?? $body['id'] ?? null;
     $flagColor = strtolower(trim($body['flagColor'] ?? $body['flag_color'] ?? 'none'));
 
-    $valid = ['none', 'green', 'yellow', 'red', 'dead'];
+    $valid = ['none', 'green', 'yellow', 'red', 'dead', 'duplicate'];
     if (!in_array($flagColor, $valid)) {
         $flagColor = 'none';
     }
@@ -180,10 +206,10 @@ if ($action === 'reset-votes' || (isset($body['action']) && $body['action'] === 
     $vId = (int)($body['village_id'] ?? $body['villageId'] ?? 0);
     try {
         if ($vId > 0) {
-            $stmt = $pdo->prepare("UPDATE voters SET is_voted = 0, voted_at = NULL WHERE village_id = ?");
+            $stmt = $pdo->prepare("UPDATE voters SET is_voted = 0, voted_at = NULL WHERE village_id = ? AND LOWER(COALESCE(flag_color, 'none')) NOT IN ('dead', 'duplicate')");
             $stmt->execute([$vId]);
         } else {
-            $pdo->exec("UPDATE voters SET is_voted = 0, voted_at = NULL");
+            $pdo->exec("UPDATE voters SET is_voted = 0, voted_at = NULL WHERE LOWER(COALESCE(flag_color, 'none')) NOT IN ('dead', 'duplicate')");
         }
         echo json_encode(['success' => true, 'message' => 'అన్ని ఓట్లు రీసెట్ చేయబడ్డాయి (Votes reset successfully)'], JSON_UNESCAPED_UNICODE);
         exit();
@@ -207,14 +233,89 @@ if ($action === 'edit' || (isset($body['action']) && $body['action'] === 'edit')
         $name = $body['name'] ?? null;
         $houseNo = $body['house_no'] ?? $body['houseNo'] ?? null;
 
-        $stmt = $pdo->prepare("
-            UPDATE voters 
+        $hasFamilyHead = array_key_exists('is_family_head', $body) || array_key_exists('isFamilyHead', $body);
+        $hasFamilyEpic = array_key_exists('belongs_to_family', $body) || array_key_exists('belongsToFamily', $body);
+        if ($hasFamilyHead !== $hasFamilyEpic) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Both family head and family EPIC fields are required'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+
+        $sql = "
+            UPDATE voters
             SET notes = COALESCE(?, notes),
                 name = COALESCE(?, name),
                 house_no = COALESCE(?, house_no)
-            WHERE id = ? OR epic = ? OR sl_no = ?
-        ");
-        $stmt->execute([$notes, $name, $houseNo, $voterId, $voterId, $voterId]);
+        ";
+        $params = [$notes, $name, $houseNo];
+
+        if ($hasFamilyHead) {
+            $familyHeadValue = $body['is_family_head'] ?? $body['isFamilyHead'];
+            if (!in_array($familyHeadValue, [true, false, 0, 1, '0', '1'], true)) {
+                http_response_code(400);
+                echo json_encode(['error' => 'A valid family head status is required'], JSON_UNESCAPED_UNICODE);
+                exit();
+            }
+            $isFamilyHead = in_array($familyHeadValue, [true, 1, '1'], true);
+            $belongsToFamily = strtoupper(trim((string)($body['belongs_to_family'] ?? $body['belongsToFamily'] ?? '')));
+            if (strlen($belongsToFamily) > 32) {
+                http_response_code(400);
+                echo json_encode(['error' => 'Family head EPIC must be 32 characters or fewer'], JSON_UNESCAPED_UNICODE);
+                exit();
+            }
+
+            $voterStmt = $pdo->prepare("SELECT id, epic, village_id, is_family_head FROM voters WHERE id = ? OR epic = ? OR sl_no = ? LIMIT 1");
+            $voterStmt->execute([$voterId, $voterId, $voterId]);
+            $targetVoter = $voterStmt->fetch();
+            if (!$targetVoter) {
+                http_response_code(404);
+                echo json_encode(['error' => 'Voter not found'], JSON_UNESCAPED_UNICODE);
+                exit();
+            }
+
+            if ($isFamilyHead) {
+                $belongsToFamily = '';
+            } elseif ($belongsToFamily !== '') {
+                if (strcasecmp($belongsToFamily, (string)$targetVoter['epic']) === 0) {
+                    http_response_code(400);
+                    echo json_encode(['error' => 'A voter cannot belong to their own family head record'], JSON_UNESCAPED_UNICODE);
+                    exit();
+                }
+
+                $headStmt = $pdo->prepare("
+                    SELECT id FROM voters
+                    WHERE UPPER(epic) = ? AND village_id = ? AND is_family_head = 1
+                    LIMIT 1
+                ");
+                $headStmt->execute([$belongsToFamily, $targetVoter['village_id']]);
+                if (!$headStmt->fetch()) {
+                    http_response_code(400);
+                    echo json_encode(['error' => 'Family head EPIC must belong to a voter marked as family head in the same village'], JSON_UNESCAPED_UNICODE);
+                    exit();
+                }
+            }
+
+            if (!$isFamilyHead && (int)($targetVoter['is_family_head'] ?? 0) === 1) {
+                $membersStmt = $pdo->prepare("SELECT COUNT(*) FROM voters WHERE UPPER(belongs_to_family) = UPPER(?) AND village_id = ?");
+                $membersStmt->execute([$targetVoter['epic'], $targetVoter['village_id']]);
+                if ((int)$membersStmt->fetchColumn() > 0) {
+                    http_response_code(409);
+                    echo json_encode(['error' => "Reassign this family head's members before removing the head status"], JSON_UNESCAPED_UNICODE);
+                    exit();
+                }
+            }
+
+            $sql .= ", is_family_head = ?, belongs_to_family = ?";
+            $params[] = $isFamilyHead ? 1 : 0;
+            $params[] = $belongsToFamily !== '' ? $belongsToFamily : null;
+        }
+
+        $sql .= " WHERE id = ? OR epic = ? OR sl_no = ?";
+        $params[] = $voterId;
+        $params[] = $voterId;
+        $params[] = $voterId;
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
         echo json_encode(['success' => true, 'message' => 'ఓటరు వివరాలు నవీకరించబడ్డాయి'], JSON_UNESCAPED_UNICODE);
         exit();
     } catch (Exception $e) {
@@ -353,7 +454,9 @@ if ($method === 'GET') {
                         'out_of_station_location' => null,
                         'expected_to_return' => null,
                         'flag_color' => 'none',
-                        'flagColor' => 'none'
+                        'flagColor' => 'none',
+                        'is_family_head' => 0,
+                        'belongs_to_family' => null
                     ];
                 }, $fallback, array_keys($fallback));
             }
@@ -412,6 +515,10 @@ if ($method === 'GET') {
                 'expected_to_return' => isset($r['expected_to_return']) ? (int)$r['expected_to_return'] : null,
                 'flag_color' => $r['flag_color'] ?? 'none',
                 'flagColor' => $r['flag_color'] ?? 'none',
+                'is_family_head' => (int)($r['is_family_head'] ?? 0),
+                'isFamilyHead' => (int)($r['is_family_head'] ?? 0),
+                'belongs_to_family' => $r['belongs_to_family'] ?? null,
+                'belongsToFamily' => $r['belongs_to_family'] ?? null,
             ];
         }, $rows);
 

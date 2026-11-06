@@ -530,6 +530,11 @@ app.post(votePaths, (req: Request, res: Response) => {
   );
 
   if (v) {
+    if (['dead', 'duplicate'].includes(String(v.flag_color || v.flagColor || 'none').toLowerCase())) {
+      res.status(409).json({ error: 'Voting actions are disabled for Dead and Duplicate voters' });
+      return;
+    }
+
     if (targetStatus !== undefined && targetStatus !== null) {
       v.is_voted = (targetStatus === 'VOTED' || targetStatus === 1 || targetStatus === '1') ? 1 : 0;
     } else {
@@ -563,7 +568,7 @@ const flagPaths = [
 app.post(flagPaths, (req: Request, res: Response) => {
   const voterId = req.body?.voterId || req.body?.id;
   let flagColor = (req.body?.flagColor || req.body?.flag_color || 'none').toLowerCase();
-  const validFlags = ['none', 'green', 'yellow', 'red', 'dead'];
+  const validFlags = ['none', 'green', 'yellow', 'red', 'dead', 'duplicate'];
   if (!validFlags.includes(flagColor)) {
     flagColor = 'none';
   }
@@ -602,7 +607,10 @@ const resetVotesPaths = [
 app.post(resetVotesPaths, (req: Request, res: Response) => {
   const vId = req.body?.village_id || req.body?.villageId;
   for (const v of cachedVoters) {
-    if (!vId || String(v.village_id) === String(vId)) {
+    if (
+      (!vId || String(v.village_id) === String(vId)) &&
+      !['dead', 'duplicate'].includes(String(v.flag_color || v.flagColor || 'none').toLowerCase())
+    ) {
       v.is_voted = 0;
       v.votingStatus = 'NOT_VOTED';
       v.voted_at = null;

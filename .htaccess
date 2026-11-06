@@ -42,7 +42,7 @@
     RewriteRule ^api/voters/out-of-station/?$ routes/voters.php?action=out-of-station [QSA,L]
     RewriteRule ^api/voters/flag/?$ routes/voters.php?action=flag [QSA,L]
     RewriteRule ^api/voters/reset-votes/?$ routes/voters.php?action=reset-votes [QSA,L]
-    RewriteRule ^api/voters/edit/?$ routes/voters.php?action=edit [QSA,L]
+    RewriteRule ^api/voters/edit/?$ api/voters/edit/index.php [QSA,L]
     RewriteRule ^api/voters/?$ routes/voters.php [QSA,L]
     RewriteRule ^api/admin/users/?$ routes/admin.php?action=users [QSA,L]
     RewriteRule ^api/admin/stats/?$ routes/admin.php?action=stats [QSA,L]

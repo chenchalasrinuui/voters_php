@@ -1,0 +1,3 @@
+ALTER TABLE voters
+  ADD COLUMN is_family_head TINYINT(1) NOT NULL DEFAULT 0,
+  ADD COLUMN belongs_to_family VARCHAR(32) NULL DEFAULT NULL;
