@@ -7,12 +7,17 @@ if (is_string($requestPath) && preg_match('#/api/admin(?:/([^/]+)(?:/([^/]+))?)?
     $adminActions = [
         'users' => 'users',
         'stats' => 'stats',
+        'locations' => 'locations',
         'toggle-user' => 'toggle-user',
         'delete-user' => 'delete-user',
     ];
 
     if (isset($adminActions[$resource])) {
-        $_GET['action'] = $adminActions[$resource];
+        $_GET['action'] = $resource === 'users'
+            && isset($matches[2])
+            && in_array(strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET'), ['POST', 'PUT', 'PATCH'], true)
+            ? 'update-user'
+            : $adminActions[$resource];
         if ($resource === 'users' && isset($matches[2]) && ctype_digit($matches[2])) {
             $_GET['id'] = $matches[2];
         }

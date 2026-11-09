@@ -238,6 +238,85 @@
           }
         }
       }
+    },
+    "/api/admin/locations": {
+      "get": {
+        "summary": "Location options for admin user registration",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "district",
+            "in": "query",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "constituency",
+            "in": "query",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Available state, district, constituency, and mandal choices"
+          }
+        }
+      }
+    },
+    "/api/admin/users/{id}": {
+      "patch": {
+        "summary": "Update an admin-created user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["username", "name", "state", "district", "constituency", "mandal"],
+                "properties": {
+                  "username": { "type": "string" },
+                  "password": { "type": "string" },
+                  "name": { "type": "string" },
+                  "state": { "type": "string" },
+                  "district": { "type": "string" },
+                  "constituency": { "type": "string" },
+                  "mandal": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "User updated" },
+          "403": { "description": "User is not owned by the current super-admin" }
+        }
+      },
+      "delete": {
+        "summary": "Delete an admin-created user and its villages and voters",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "User deleted" },
+          "403": { "description": "User is not owned by the current super-admin" }
+        }
+      }
     }
   }
 }

@@ -22,6 +22,61 @@ $action = $_GET['action'] ?? '';
 $raw = file_get_contents('php://input');
 $body = json_decode($raw, true) ?? [];
 
+// GET /api/admin/locations - Location choices for dependent registration dropdowns
+if ($action === 'locations' && $method === 'GET') {
+    try {
+        $locationSources = '(SELECT state, district, constituency, mandal FROM users
+            UNION
+            SELECT state, district, constituency, mandal FROM villages) location_options';
+        $getOptions = static function (string $column, array $filters) use ($pdo, $locationSources): array {
+            $allowedColumns = ['state', 'district', 'constituency', 'mandal'];
+            if (!in_array($column, $allowedColumns, true)) {
+                throw new InvalidArgumentException('Unsupported location field.');
+            }
+
+            $where = ["`$column` IS NOT NULL", "`$column` <> ''"];
+            $values = [];
+            foreach ($filters as $filterColumn => $value) {
+                if ($value !== '' && in_array($filterColumn, $allowedColumns, true)) {
+                    $where[] = "`$filterColumn` = ?";
+                    $values[] = $value;
+                }
+            }
+
+            $stmt = $pdo->prepare(
+                "SELECT DISTINCT `$column` FROM $locationSources WHERE "
+                . implode(' AND ', $where)
+                . " ORDER BY `$column`"
+            );
+            $stmt->execute($values);
+            return array_column($stmt->fetchAll(), $column);
+        };
+
+        $state = trim((string)($_GET['state'] ?? ''));
+        $district = trim((string)($_GET['district'] ?? ''));
+        $constituency = trim((string)($_GET['constituency'] ?? ''));
+
+        echo json_encode([
+            'states' => $getOptions('state', []),
+            'districts' => $getOptions('district', ['state' => $state]),
+            'constituencies' => $getOptions('constituency', [
+                'state' => $state,
+                'district' => $district,
+            ]),
+            'mandals' => $getOptions('mandal', [
+                'state' => $state,
+                'district' => $district,
+                'constituency' => $constituency,
+            ]),
+        ], JSON_UNESCAPED_UNICODE);
+        exit();
+    } catch (Exception $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+}
+
 // 1. GET /api/admin/stats
 if ($action === 'stats' && $method === 'GET') {
     try {
@@ -130,6 +185,117 @@ if (($action === 'users' || $action === 'create') && $method === 'POST') {
             'status' => 'active',
             'created_at' => date('Y-m-d H:i:s')
         ], JSON_UNESCAPED_UNICODE);
+        exit();
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+}
+
+// POST /api/admin/users/:id - Update a user created by the current super-admin
+if ($action === 'update-user' && in_array($method, ['POST', 'PUT', 'PATCH'], true)) {
+    $superAdminId = requireSuperAdminSession($pdo);
+    $userId = (int)($_GET['id'] ?? 0);
+
+    if ($userId <= 0) {
+        http_response_code(400);
+        echo json_encode(['error' => 'Invalid user ID.'], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+
+    $fields = ['username', 'name', 'state', 'district', 'constituency', 'mandal', 'village'];
+    $values = [];
+    foreach ($fields as $field) {
+        if (!isset($body[$field]) || !is_string($body[$field]) || trim($body[$field]) === '') {
+            http_response_code(400);
+            echo json_encode(['error' => ucfirst($field) . ' is required.'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+        $values[$field] = trim($body[$field]);
+    }
+
+    $password = $body['password'] ?? '';
+    if (!is_string($password)) {
+        http_response_code(400);
+        echo json_encode(['error' => 'Password must be a string.'], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+
+    try {
+        $owner = $pdo->prepare('SELECT created_by_admin_id, village FROM users WHERE id = ? LIMIT 1');
+        $owner->execute([$userId]);
+        $userRecord = $owner->fetch(PDO::FETCH_ASSOC);
+        if (!$userRecord) {
+            http_response_code(404);
+            echo json_encode(['error' => 'User not found.'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+        if ((int)$userRecord['created_by_admin_id'] !== $superAdminId) {
+            http_response_code(403);
+            echo json_encode(['error' => 'You can edit only users created by your super-admin account.'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+
+        $check = $pdo->prepare('SELECT id FROM users WHERE username = ? AND id <> ? LIMIT 1');
+        $check->execute([$values['username'], $userId]);
+        if ($check->fetchColumn()) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Username is already in use.'], JSON_UNESCAPED_UNICODE);
+            exit();
+        }
+
+        $pdo->beginTransaction();
+        $updateFields = 'username = ?, name = ?, state = ?, district = ?, constituency = ?, mandal = ?, village = ?';
+        $updateValues = [
+            $values['username'],
+            $values['name'],
+            $values['state'],
+            $values['district'],
+            $values['constituency'],
+            $values['mandal'],
+            $values['village'],
+        ];
+        if (trim($password) !== '') {
+            $updateFields .= ', password = ?';
+            $updateValues[] = trim($password);
+        }
+        $updateValues[] = $userId;
+        $pdo->prepare("UPDATE users SET $updateFields WHERE id = ?")->execute($updateValues);
+
+        if ((string)$userRecord['village'] !== $values['village']) {
+            $primaryVillage = $pdo->prepare(
+                'SELECT id FROM villages WHERE user_id = ? AND village_name = ? ORDER BY id ASC LIMIT 1'
+            );
+            $primaryVillage->execute([$userId, $userRecord['village']]);
+            $primaryVillageId = $primaryVillage->fetchColumn();
+            if ($primaryVillageId !== false) {
+                $pdo->prepare(
+                    'UPDATE villages SET village_name = ?, village_name_te = ?, booth_name = ? WHERE id = ?'
+                )->execute([
+                    $values['village'],
+                    $values['village'],
+                    $values['village'] . ' పోలింగ్ కేంద్రం',
+                    $primaryVillageId,
+                ]);
+            }
+        }
+
+        $pdo->prepare(
+            'UPDATE villages SET state = ?, district = ?, constituency = ?, mandal = ? WHERE user_id = ?'
+        )->execute([
+            $values['state'],
+            $values['district'],
+            $values['constituency'],
+            $values['mandal'],
+            $userId,
+        ]);
+        $pdo->commit();
+
+        echo json_encode(['success' => true, 'id' => $userId] + $values, JSON_UNESCAPED_UNICODE);
         exit();
     } catch (Exception $e) {
         if ($pdo->inTransaction()) {
