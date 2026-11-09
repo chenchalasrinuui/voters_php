@@ -205,3 +205,6 @@ if ($action === 'delete-user' || ($method === 'DELETE' && isset($_GET['id']))) {
         exit();
     }
 }
+
+http_response_code(404);
+echo json_encode(['error' => 'Admin endpoint not found.'], JSON_UNESCAPED_UNICODE);
